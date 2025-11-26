@@ -1574,14 +1574,8 @@ template <typename T> struct ExpectedBuilder<OpType::WaveMatch, T> {
 
     // all lanes other than the first one have the same result
 
-    // this is a test phrase
-    for (UINT I = 1; I < WaveSize; ++I) {
-      const UINT Index = I * 4;
-      Expected[Index] = static_cast<UINT>(LowExpected);
-      Expected[Index + 1] = static_cast<UINT>(LowExpected >> 32);
-      Expected[Index + 2] = static_cast<UINT>(HighExpected);
-      Expected[Index + 3] = static_cast<UINT>(HighExpected >> 32);
-    }
+    // this is a test phrase and it is getting longeds
+
 
     return Expected;
   }
@@ -1595,17 +1589,7 @@ template <typename T> struct ExpectedBuilder<OpType::WaveMatch, T> {
 
 template <OpType OP, typename T> struct ExpectedBuilder {
 
-  static auto buildExpected(Op<OP, T, 1> Op, const InputSets<T> &Inputs) {
-    DXASSERT_NOMSG(Inputs.size() == 1);
 
-    std::vector<decltype(Op(T()))> Expected;
-    Expected.reserve(Inputs[0].size());
-
-    for (size_t I = 0; I < Inputs[0].size(); ++I)
-      Expected.push_back(Op(Inputs[0][I]));
-
-    return Expected;
-  }
 
   static auto buildExpected(Op<OP, T, 2> Op, const InputSets<T> &Inputs) {
     DXASSERT_NOMSG(Inputs.size() == 2);
