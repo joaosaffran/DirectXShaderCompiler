@@ -47,8 +47,10 @@ SPIRV_CMAKE_FLAGS = [
 ]
 
 # Built unconditionally; a failure here is fatal (no binary => no release candidate).
-# dxc + FileCheck drive the lit corpus; ClangSPIRVTests is the gtest suite.
-REQUIRED_TARGETS = ["dxc", "FileCheck", "ClangSPIRVTests"]
+# The lit corpus drives the built dxc and pipes to FileCheck; lit.cfg also shells
+# out to llvm-config (assertion-mode / targets) and the error-path RUN lines use
+# `not` and `count`. ClangSPIRVTests is the gtest suite.
+REQUIRED_TARGETS = ["dxc", "FileCheck", "llvm-config", "not", "count", "ClangSPIRVTests"]
 # Best-effort: spirv-val backs 2 lit tests; ClangHLSLTests hosts the TAEF SPIR-V
 # tests. If either fails to build we note it and carry on.
 OPTIONAL_TARGETS = ["spirv-val", "ClangHLSLTests"]
