@@ -24,6 +24,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Keep this list in sync with gcp-pipelines/x86_64-linux-clang.yml.
+#
+# On Windows this configure pulls in TAEF-dependent unittests (gated by the
+# default HLSL_INCLUDE_TESTS=ON in PredefinedParams.cmake). The pipeline provides
+# TAEF via the Microsoft.Taef nuget package extracted to external/taef, which
+# FindTAEF.cmake discovers automatically -- so no TAEF-specific flags are needed
+# here. See .github/workflows/vulkan-sdk-rc.yml.
 SPIRV_CMAKE_FLAGS = [
     "-DCMAKE_BUILD_TYPE=Release",
     "-DENABLE_SPIRV_CODEGEN=ON",

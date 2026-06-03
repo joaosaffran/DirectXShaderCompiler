@@ -28,6 +28,9 @@ The pipeline runs on every push to a `release/vulkan/<version>` branch
    truth for "which SPIR-V are we shipping."
 2. **Build** — `build_and_test.py` configures DXC with `ENABLE_SPIRV_CODEGEN=ON`
    `SPIRV_BUILD_TESTS=ON` (same flags as the existing GCP build) and builds `dxc`.
+   On Windows the configure also needs TAEF (DXC's test framework); the workflow
+   restores it from the `Microsoft.Taef` nuget package into `external/taef`, where
+   `FindTAEF.cmake` discovers it automatically — so no DXC tests are disabled.
 3. **Validate** — it builds and runs `ClangSPIRVTests`, which compiles every
    shader under `tools/clang/test/CodeGenSPIRV/` and runs `spirv-val` on the
    output (the test binary links `SPIRV-Tools` directly). Green == DXC emits
