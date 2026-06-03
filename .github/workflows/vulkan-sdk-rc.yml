@@ -1,0 +1,66 @@
+name: "Vulkan SDK release candidate"
+
+# Prototype for INF-0007: prepare + validate DXC for a Vulkan SDK release.
+#
+# Triggers on any release/vulkan/<version> branch. Each push to such a branch
+# produces a validated DXC release candidate:
+#   1. Sync SPIRV-Tools + SPIRV-Headers to the commits pinned in known_good.json.
+#   2. Build DXC with SPIR-V codegen enabled.
+#   3. Run ClangSPIRVTests (compiles the CodeGenSPIRV corpus + runs spirv-val).
+#   4. Publish the result as an artifact other pipelines (shaderc, etc.) can consume.
+#
+# The heavy lifting lives in utils/vulkan-sdk/*.py so the workflow stays thin
+# and the same steps can be reproduced locally.
+
+on:
+  push:
+    branches:
+      - "release/vulkan/**"
+  workflow_dispatch:
+    # Lets a maintainer kick off an RC build by hand for any ref.
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-validate:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout DXC
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Submodules are checked out explicitly by sync_deps.py at pinned SHAs.
+          submodules: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      # Puts cl.exe / link.exe and the MSVC headers on PATH so the Ninja
+      # generator can find the compiler. Required for every build/test step below.
+      - name: Setup MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Sync SPIR-V dependencies to known_good.json
+        run: python utils/vulkan-sdk/sync_deps.py
+
+      - name: Build DXC and validate SPIR-V output
+        run: python utils/vulkan-sdk/build_and_test.py --build-dir build
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxc-vulkan-sdk-rc
+          # The dxc binary plus the manifest describing exactly what was built
+          # and validated. Downstream pipelines read rc-manifest.json to learn
+          # the DXC commit and the SPIR-V deps it was tested against.
+          path: |
+            build/bin/dxc.exe
+            build/rc-manifest.json
+          if-no-files-found: error

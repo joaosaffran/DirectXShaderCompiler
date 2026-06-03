@@ -1,0 +1,27 @@
+{
+  "$schema-description": [
+    "Pinned SPIR-V dependency commits for a Vulkan SDK release candidate of DXC.",
+    "This is the single source of truth the RC pipeline syncs the submodules to.",
+    "Format intentionally mirrors glslang's known_good.json so Vulkan SDK tooling",
+    "owners recognize it. Bump these SHAs (manually, or with `sync_deps.py --bump`)",
+    "to the agreed-upon SPIRV-Tools / SPIRV-Headers release candidate, then let the",
+    "pipeline build + validate DXC against them."
+  ],
+  "sdk_version": "unset",
+  "dependencies": [
+    {
+      "name": "SPIRV-Headers",
+      "path": "external/SPIRV-Headers",
+      "url": "https://github.com/KhronosGroup/SPIRV-Headers",
+      "branch": "main",
+      "commit": "ad9184e76a66b1001c29db9b0a3e87f646c64de0"
+    },
+    {
+      "name": "SPIRV-Tools",
+      "path": "external/SPIRV-Tools",
+      "url": "https://github.com/KhronosGroup/SPIRV-Tools",
+      "branch": "main",
+      "commit": "0539c81f69a3daeb706fd3477dca61435b475156"
+    }
+  ]
+}
