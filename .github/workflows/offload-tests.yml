@@ -1,0 +1,189 @@
+name: "Offload tests (software renderers)"
+
+# Runs the LLVM offload-test-suite against a DXC release candidate on software
+# renderers, no physical GPU:
+#   * Vulkan (check-hlsl-vk)        on lavapipe -- Mesa's pure-CPU Vulkan; runs the
+#                                   candidate's SPIR-V.
+#   * DirectX (check-hlsl-warp-d3d12) on WARP   -- Microsoft's software D3D12 device;
+#                                   runs the candidate's DXIL.
+# Reusable:
+#   * workflow_call -- the Vulkan SDK RC pipeline invokes it after publishing.
+#   * workflow_dispatch -- run it STANDALONE against an existing candidate artifact, so
+#     the heavy DXC build doesn't have to be repeated while iterating on the offload
+#     setup. Give it the run_id of a prior pipeline run and the artifact name.
+
+on:
+  workflow_call:
+    inputs:
+      artifact_name:
+        description: "dxc_rc_<version> artifact name."
+        type: string
+        required: true
+      run_id:
+        description: "ID of the run that produced the artifact."
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "ID of the pipeline run that produced the dxc_rc artifact."
+        type: string
+        required: true
+      artifact_name:
+        description: "Artifact name from that run (e.g. dxc_rc_main)."
+        type: string
+        required: true
+        default: "dxc_rc_main"
+
+permissions:
+  contents: read
+  actions: read   # download-artifact from another run uses the Actions API
+
+jobs:
+  offload-tests:
+    runs-on: windows-latest
+    steps:
+      - name: Download the release candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: rc
+
+      - name: Locate DXC_DIR
+        id: dxc
+        shell: pwsh
+        run: |
+          $dxc = Get-ChildItem rc -Recurse -Filter dxc.exe | Select-Object -First 1
+          if (-not $dxc) { throw "dxc.exe not found in the RC artifact '${{ inputs.artifact_name }}'" }
+          "dir=$($dxc.Directory.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "DXC_DIR = $($dxc.Directory.FullName)"
+
+      - name: Setup MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The offload suite's Vulkan backend -- and the check-hlsl-vk target -- is only
+      # built when find_package(Vulkan) succeeds, so install the Vulkan SDK for the
+      # headers + loader (vulkan-1.lib/.dll). The runtime ICD is supplied separately.
+      - name: Install Vulkan SDK (headers + loader)
+        shell: pwsh
+        run: |
+          $exe = "$env:RUNNER_TEMP\VulkanSDK.exe"
+          Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe?Human=true" -OutFile $exe
+          Start-Process $exe -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -Wait
+          $sdk = (Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          if (-not $sdk) { throw "Vulkan SDK install dir not found under C:\VulkanSDK" }
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$sdk\Bin"        | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "VULKAN_SDK = $sdk"
+
+      # Fetch Mesa and register the lavapipe (lvp, pure-CPU Vulkan) ICD in
+      # HKLM\SOFTWARE\Khronos\Vulkan\Drivers -- the Vulkan loader IGNORES
+      # VK_DRIVER_FILES / VK_ICD_FILENAMES when the process is elevated (GitHub runners
+      # run elevated), so the registry is the only discovery path. Use reg.exe (the
+      # value name is the full ICD path; a path contains ':' and '\', which PowerShell's
+      # New-ItemProperty -Name mangles). Pick the .x86_64.json (a 32-bit .x86.json would
+      # load as VK_ERROR_INCOMPATIBLE_DRIVER). The Mesa package also ships dxil.dll,
+      # which dxc needs to sign DXIL for the WARP/DirectX run below.
+      - name: Fetch Mesa and register the lavapipe Vulkan ICD
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Pin the Mesa release; keep in sync with vulkan-sdk-rc.yml's LAVAPIPE_VERSION,
+          # which the manifest records as lavapipe_version, so it matches what runs.
+          $ver = "26.1.2"
+          gh release download "$ver" -R pal1000/mesa-dist-win --pattern "*release-msvc.7z" -D "$env:RUNNER_TEMP\mesa"
+          $pkg = (Get-ChildItem "$env:RUNNER_TEMP\mesa" -Filter "*release-msvc.7z" | Select-Object -First 1).FullName
+          if (-not $pkg) { throw "Mesa $ver release-msvc.7z not found" }
+          7z x "$pkg" -o"$env:RUNNER_TEMP\mesa\x" -y | Out-Null
+          $lvp = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "lvp_icd.x86_64.json" | Select-Object -First 1).FullName
+          if (-not $lvp) { throw "lavapipe ICD (lvp_icd.x86_64.json) not found in Mesa package" }
+          reg add "HKLM\SOFTWARE\Khronos\Vulkan\Drivers" /v "$lvp" /t REG_DWORD /d 0 /f /reg:64
+          reg query "HKLM\SOFTWARE\Khronos\Vulkan\Drivers" /reg:64
+          Write-Host "Registered lavapipe ICD: $lvp"
+
+      - name: Checkout offload-test-suite
+        uses: actions/checkout@v4
+        with:
+          repository: llvm/offload-test-suite
+          path: OffloadTest
+          fetch-depth: 1
+
+      - name: Checkout LLVM
+        uses: actions/checkout@v4
+        with:
+          repository: llvm/llvm-project
+          path: llvm-project
+          fetch-depth: 1
+      - name: Checkout golden images
+        uses: actions/checkout@v4
+        with:
+          repository: llvm/offload-golden-images
+          path: golden-images
+          fetch-depth: 1
+      - name: Install OffloadTest python deps
+        run: python -m pip install -r OffloadTest/test/requirements.txt
+
+      # WARP_VERSION pins the WARP build the Direct3D 12 tests run against. Keep it in
+      # sync with vulkan-sdk-rc.yml's WARP_VERSION, which the manifest records as
+      # warp_version, so the manifest matches what actually ran.
+      - name: Configure LLVM + OffloadTest against the RC's DXC
+        run: >-
+          cmake -G Ninja -B llvm-project/build
+          -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=On
+          -DLLVM_EXTERNAL_PROJECTS=OffloadTest
+          -C llvm-project/clang/cmake/caches/HLSL.cmake
+          -DDXC_DIR="${{ steps.dxc.outputs.dir }}"
+          -DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=${{ github.workspace }}/OffloadTest
+          -DGOLDENIMAGE_DIR=${{ github.workspace }}/golden-images
+          -DOFFLOADTEST_TEST_CLANG=Off
+          -DWARP_VERSION=1.0.19
+          -DLLVM_LIT_ARGS="--xunit-xml-output=testresults.xunit.xml -v"
+          llvm-project/llvm
+
+      - name: Build offload test dependencies
+        run: cmake --build llvm-project/build --target hlsl-test-depends
+
+      # Vulkan path: the candidate's SPIR-V on lavapipe (Mesa's pure-CPU Vulkan, the
+      # only registered Vulkan ICD). Prepend the Mesa folder to PATH so vulkan_lvp.dll
+      # resolves its dependencies. VK_LOADER_DEBUG is honored even when elevated, so
+      # keep it for diagnostics.
+      - name: Run Vulkan offload tests on lavapipe
+        shell: pwsh
+        run: |
+          $bin = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "lvp_icd.x86_64.json" | Select-Object -First 1).Directory.FullName
+          if (-not $bin) { throw "lavapipe ICD (lvp_icd.x86_64.json) not found in Mesa package" }
+          $env:PATH = "$bin;$env:PATH"
+          $env:VK_LOADER_DEBUG = "all"
+          $env:LIT_OPTS = "--xunit-xml-output=$env:GITHUB_WORKSPACE\results-vk-lavapipe.xml"
+          cmake --build llvm-project/build --target check-hlsl-vk
+
+      # DirectX path: the candidate's DXIL on WARP (Microsoft's software D3D12 device,
+      # downloaded by the suite's setup_warp at configure time). dxc needs dxil.dll to
+      # sign DXIL; the Mesa folder (on PATH) ships it.
+      - name: Run DirectX offload tests on WARP
+        if: always()   # run even if the Vulkan pass failed
+        shell: pwsh
+        run: |
+          $bin = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "lvp_icd.x86_64.json" | Select-Object -First 1).Directory.FullName
+          $env:PATH = "$bin;$env:PATH"
+          $env:LIT_OPTS = "--xunit-xml-output=$env:GITHUB_WORKSPACE\results-d3d12-warp.xml"
+          cmake --build llvm-project/build --target check-hlsl-warp-d3d12
+
+      - name: Upload offload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offload-results-${{ inputs.artifact_name }}
+          path: ${{ github.workspace }}/results-*.xml
+          if-no-files-found: warn
