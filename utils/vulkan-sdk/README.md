@@ -33,13 +33,15 @@ The pipeline runs on every push to a `release/vulkan/<version>` branch
    microsoft/terminal uses — it's not on nuget.org) and exports `TAEF_INCLUDE_DIR`
    + `TAEF_EXECUTABLE`, which `build_and_test.py` forwards to pre-seed
    `FindTAEF.cmake`. No DXC tests are disabled.
-3. **Validate** — it builds and runs `ClangSPIRVTests`, which compiles every
-   shader under `tools/clang/test/CodeGenSPIRV/` and runs `spirv-val` on the
-   output (the test binary links `SPIRV-Tools` directly). Green == DXC emits
-   valid SPIR-V against the pinned deps.
-4. **Publish** — the `dxc` binary and a `rc-manifest.json` (DXC commit + the
-   SPIR-V commits it was validated against) are uploaded as an artifact other
-   pipelines (shaderc, glslang, …) can consume.
+3. **Validate** — it runs `ClangSPIRVTests`, the SPIR-V backend gtest suite,
+   which links `SPIRV-Tools` and runs `spirv-val`. Test failures are recorded but
+   do **not** block publishing (`--allow-test-failures`); the manifest's
+   `validated` flag is false when any test failed. (This is the unit-test suite;
+   the larger `tools/clang/test/CodeGenSPIRV/` FileCheck corpus — ~1300 files run
+   via lit — is not yet wired in. See "Not yet prototyped".)
+4. **Publish** — the `dxc` binary, `rc-manifest.json` (DXC commit + pinned SPIR-V
+   commits + pass/fail counts + `validated` flag), and the JUnit test report are
+   uploaded as an artifact other pipelines (shaderc, glslang, …) can consume.
 
 ## Bumping the pinned versions
 
@@ -63,6 +65,8 @@ python utils/vulkan-sdk/build_and_test.py --build-dir build
 
 ## Not yet prototyped (discussion points for the spec)
 
+- Running the full `tools/clang/test/CodeGenSPIRV/` FileCheck corpus (~1300 files
+  via lit) in addition to the `ClangSPIRVTests` unit suite, for complete coverage.
 - Tagging the validated commit `vulkan-sdk-X.Y.ZZZ.w` and aligning it with a
   formal DXC GitHub/NuGet release (the Godbolt goal in INF-0007).
 - Publishing to a durable, cross-org consumable location (vs. a workflow artifact).

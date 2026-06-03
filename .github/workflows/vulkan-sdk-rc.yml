@@ -73,17 +73,25 @@ jobs:
       - name: Sync SPIR-V dependencies to known_good.json
         run: python utils/vulkan-sdk/sync_deps.py
 
+      # --allow-test-failures: record failures in the manifest but still exit 0,
+      # so a test regression doesn't block publishing the candidate. Gate on the
+      # manifest's "validated" field downstream instead.
       - name: Build DXC and validate SPIR-V output
-        run: python utils/vulkan-sdk/build_and_test.py --build-dir build
+        run: python utils/vulkan-sdk/build_and_test.py --build-dir build --allow-test-failures
 
       - name: Upload release candidate
+        # always(): publish even if an earlier step reported problems. A genuine
+        # build failure leaves no dxc.exe, so if-no-files-found: warn keeps that
+        # from masking the real error with a second one.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dxc-vulkan-sdk-rc
-          # The dxc binary plus the manifest describing exactly what was built
-          # and validated. Downstream pipelines read rc-manifest.json to learn
-          # the DXC commit and the SPIR-V deps it was tested against.
+          # The dxc binary, the manifest (dxc commit + pinned SPIR-V deps +
+          # pass/fail counts + validated flag), and the JUnit test report.
+          # Downstream pipelines read rc-manifest.json.
           path: |
             build/bin/dxc.exe
             build/rc-manifest.json
-          if-no-files-found: error
+            build/spirv-test-results.xml
+          if-no-files-found: warn
