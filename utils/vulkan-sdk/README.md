@@ -33,15 +33,22 @@ The pipeline runs on every push to a `release/vulkan/<version>` branch
    microsoft/terminal uses — it's not on nuget.org) and exports `TAEF_INCLUDE_DIR`
    + `TAEF_EXECUTABLE`, which `build_and_test.py` forwards to pre-seed
    `FindTAEF.cmake`. No DXC tests are disabled.
-3. **Validate** — it runs `ClangSPIRVTests`, the SPIR-V backend gtest suite,
-   which links `SPIRV-Tools` and runs `spirv-val`. Test failures are recorded but
-   do **not** block publishing (`--allow-test-failures`); the manifest's
-   `validated` flag is false when any test failed. (This is the unit-test suite;
-   the larger `tools/clang/test/CodeGenSPIRV/` FileCheck corpus — ~1300 files run
-   via lit — is not yet wired in. See "Not yet prototyped".)
+3. **Validate** — it runs *every* SPIR-V test, across all three harnesses:
+   - **gtest** `ClangSPIRVTests` — the SPIR-V backend unit suite (links
+     `SPIRV-Tools`, runs `spirv-val`).
+   - **lit** `tools/clang/test/CodeGenSPIRV/` — the ~1300-file FileCheck codegen
+     corpus, driven through the built `dxc`.
+   - **TAEF** the SPIR-V tests in `ClangHLSLTests` (e.g. `RewriterTest::RunSpirv`),
+     selected by a `*Spirv*` name filter.
+
+   Each harness runs independently and is non-fatal; per-suite pass/fail counts
+   and failing test names are recorded in the manifest. The top-level `validated`
+   flag is true only when every suite ran and passed. `--allow-test-failures`
+   keeps failures from blocking publication.
 4. **Publish** — the `dxc` binary, `rc-manifest.json` (DXC commit + pinned SPIR-V
-   commits + pass/fail counts + `validated` flag), and the JUnit test report are
-   uploaded as an artifact other pipelines (shaderc, glslang, …) can consume.
+   commits + per-suite results + `validated` flag), and the per-harness JUnit
+   reports are uploaded as an artifact other pipelines (shaderc, glslang, …)
+   can consume.
 
 ## Bumping the pinned versions
 
@@ -65,8 +72,6 @@ python utils/vulkan-sdk/build_and_test.py --build-dir build
 
 ## Not yet prototyped (discussion points for the spec)
 
-- Running the full `tools/clang/test/CodeGenSPIRV/` FileCheck corpus (~1300 files
-  via lit) in addition to the `ClangSPIRVTests` unit suite, for complete coverage.
 - Tagging the validated commit `vulkan-sdk-X.Y.ZZZ.w` and aligning it with a
   formal DXC GitHub/NuGet release (the Godbolt goal in INF-0007).
 - Publishing to a durable, cross-org consumable location (vs. a workflow artifact).

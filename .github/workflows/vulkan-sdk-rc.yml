@@ -88,10 +88,10 @@ jobs:
         with:
           name: dxc-vulkan-sdk-rc
           # The dxc binary, the manifest (dxc commit + pinned SPIR-V deps +
-          # pass/fail counts + validated flag), and the JUnit test report.
-          # Downstream pipelines read rc-manifest.json.
+          # per-suite pass/fail counts + validated flag), and the per-harness
+          # JUnit reports. Downstream pipelines read rc-manifest.json.
           path: |
             build/bin/dxc.exe
             build/rc-manifest.json
-            build/spirv-test-results.xml
+            build/spirv-*-results.xml
           if-no-files-found: warn
