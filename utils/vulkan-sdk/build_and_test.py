@@ -60,6 +60,16 @@ def configure(build_dir, jobs):
         *SPIRV_CMAKE_FLAGS,
         "-C", str(cache),
     ]
+    # On Windows the configure needs TAEF (find_package(TAEF REQUIRED) in the
+    # HLSL/dxilconv unittests). The pipeline restores the Microsoft.Taef nuget
+    # package and exports these env vars; forwarding them pre-seeds FindTAEF.cmake's
+    # find_path/find_program cache entries so it skips searching (the package's
+    # binaries dir is named differently across versions). The TAEF .libs are then
+    # found relative to TAEF_INCLUDE_DIR, so we don't need to point at them.
+    for cache_var in ("TAEF_INCLUDE_DIR", "TAEF_EXECUTABLE"):
+        value = os.environ.get(cache_var)
+        if value:
+            cmd.append(f"-D{cache_var}={value}")
     run(cmd, cwd=str(REPO_ROOT))
 
 

@@ -27,7 +27,9 @@ jobs:
     runs-on: windows-latest
     env:
       # TAEF test framework, restored from nuget (see the "Install TAEF" step).
-      TAEF_VERSION: "10.84.230927001"
+      # Not on nuget.org -- served from the public feed microsoft/terminal uses.
+      TAEF_VERSION: "10.100.251104001"
+      TAEF_FEED: "https://pkgs.dev.azure.com/shine-oss/terminal/_packaging/TerminalDependencies%40Local/nuget/v3/index.json"
     steps:
       - name: Checkout DXC
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -51,18 +53,22 @@ jobs:
           arch: x64
 
       # DXC's Windows test targets do find_package(TAEF REQUIRED), and TAEF isn't
-      # on the runner. Restore it from the Microsoft.Taef nuget package (nuget.exe
-      # is preinstalled on windows runners) into external/taef -- the exact layout
-      # FindTAEF.cmake searches (external/taef/build/{Include,Binaries/amd64,...}).
+      # on the runner. Restore the Microsoft.Taef nuget package (nuget.exe is
+      # preinstalled on windows runners) and export the include dir + TE.exe so
+      # build_and_test.py can pre-seed FindTAEF.cmake. We discover the paths rather
+      # than hardcode them because the binaries folder name varies between TAEF
+      # versions (e.g. build/Binaries/x64 vs build/Binaries/amd64).
       - name: Install TAEF (test framework)
         shell: pwsh
         run: |
-          nuget install Microsoft.Taef -Version $env:TAEF_VERSION -OutputDirectory "$env:RUNNER_TEMP\taef" -ExcludeVersion
-          Move-Item "$env:RUNNER_TEMP\taef\Microsoft.Taef" external\taef
-          if (-not (Test-Path "external\taef\build\Include\Wex.Common.h")) {
-            throw "Unexpected TAEF package layout: external\taef\build\Include\Wex.Common.h not found"
-          }
-          Write-Host "TAEF $env:TAEF_VERSION restored to external\taef"
+          nuget install Microsoft.Taef -Version $env:TAEF_VERSION -Source $env:TAEF_FEED -OutputDirectory "$env:RUNNER_TEMP\taef" -ExcludeVersion
+          $root = "$env:RUNNER_TEMP\taef\Microsoft.Taef"
+          $te  = Get-ChildItem $root -Recurse -Filter TE.exe | Where-Object { $_.FullName -match '\\(x64|amd64)\\' } | Select-Object -First 1
+          $inc = Get-ChildItem $root -Recurse -Filter Wex.Common.h | Select-Object -First 1
+          if (-not $te -or -not $inc) { throw "Could not locate TE.exe / Wex.Common.h in restored TAEF package" }
+          "TAEF_EXECUTABLE=$($te.FullName)"        | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TAEF_INCLUDE_DIR=$($inc.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "TAEF $env:TAEF_VERSION: TE.exe=$($te.FullName)  include=$($inc.Directory.FullName)"
 
       - name: Sync SPIR-V dependencies to known_good.json
         run: python utils/vulkan-sdk/sync_deps.py
