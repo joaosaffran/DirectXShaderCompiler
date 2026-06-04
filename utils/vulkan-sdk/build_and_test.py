@@ -47,10 +47,16 @@ SPIRV_CMAKE_FLAGS = [
 ]
 
 # Built unconditionally; a failure here is fatal (no binary => no release candidate).
-# The lit corpus drives the built dxc and pipes to FileCheck; lit.cfg also shells
-# out to llvm-config (assertion-mode / targets) and the error-path RUN lines use
-# `not` and `count`. ClangSPIRVTests is the gtest suite.
-REQUIRED_TARGETS = ["dxc", "FileCheck", "llvm-config", "not", "count", "ClangSPIRVTests"]
+# lit.cfg registers substitutions for the whole DX tool family (%dxc %dxv %dxa
+# %dxopt %dxr %dxl, plus %batch -> dxc_batch on Windows) and escapes every
+# substitution value up front -- so any of these we DON'T build is None and crashes
+# lit on *every* test, even though CodeGenSPIRV itself only invokes %dxc. lit.cfg
+# also shells out to llvm-config, and error-path RUN lines use `not`/`count`.
+# ClangSPIRVTests is the gtest suite.
+REQUIRED_TARGETS = ["dxc", "dxv", "dxa", "dxopt", "dxr", "dxl",
+                    "FileCheck", "llvm-config", "not", "count", "ClangSPIRVTests"]
+if sys.platform == "win32":
+    REQUIRED_TARGETS.append("dxc_batch")  # %batch substitution, Windows-only
 # Best-effort: spirv-val backs 2 lit tests; ClangHLSLTests hosts the TAEF SPIR-V
 # tests. If either fails to build we note it and carry on.
 OPTIONAL_TARGETS = ["spirv-val", "ClangHLSLTests"]
