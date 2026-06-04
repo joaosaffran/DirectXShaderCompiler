@@ -44,6 +44,10 @@ SPIRV_CMAKE_FLAGS = [
     "-DENABLE_SPIRV_CODEGEN=ON",
     "-DSPIRV_BUILD_TESTS=ON",
     "-DLLVM_ENABLE_WERROR=On",
+    # DXC normally sets SPIRV_SKIP_EXECUTABLES=ON (it only needs the SPIRV-Tools
+    # library). Override it (the set() in external/CMakeLists.txt is non-FORCE) so
+    # the standalone spirv-val executable is built and shipped in the RC.
+    "-DSPIRV_SKIP_EXECUTABLES=OFF",
 ]
 
 # Built unconditionally; a failure here is fatal (no binary => no release candidate).
@@ -54,12 +58,13 @@ SPIRV_CMAKE_FLAGS = [
 # also shells out to llvm-config, and error-path RUN lines use `not`/`count`.
 # ClangSPIRVTests is the gtest suite.
 REQUIRED_TARGETS = ["dxc", "dxv", "dxa", "dxopt", "dxr", "dxl",
-                    "FileCheck", "llvm-config", "not", "count", "ClangSPIRVTests"]
+                    "FileCheck", "llvm-config", "not", "count",
+                    "spirv-val", "ClangSPIRVTests"]
 if sys.platform == "win32":
     REQUIRED_TARGETS.append("dxc_batch")  # %batch substitution, Windows-only
-# Best-effort: spirv-val backs 2 lit tests; ClangHLSLTests hosts the TAEF SPIR-V
-# tests. If either fails to build we note it and carry on.
-OPTIONAL_TARGETS = ["spirv-val", "ClangHLSLTests"]
+# Best-effort: ClangHLSLTests hosts the TAEF SPIR-V tests. If it fails to build we
+# note it and carry on.
+OPTIONAL_TARGETS = ["ClangHLSLTests"]
 
 GTEST_TARGET = "ClangSPIRVTests"
 TAEF_DLL = "ClangHLSLTests"
