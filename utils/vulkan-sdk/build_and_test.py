@@ -142,7 +142,10 @@ def build_spirv_val(main_build_dir, jobs):
     configure = [
         "cmake", "-S", str(SPIRV_TOOLS_SRC), "-B", str(st_build), "-GNinja",
         "-DCMAKE_BUILD_TYPE=Release", "-DSPIRV_SKIP_TESTS=ON",
-        f"-DSPIRV-Headers_SOURCE_DIR={SPIRV_HEADERS_SRC}",
+        # Forward slashes: SPIRV-Tools embeds this path into a cmake string (the
+        # --extinst-grammar command), where Windows backslashes become invalid
+        # escapes ("\a", ...). as_posix() avoids that.
+        f"-DSPIRV-Headers_SOURCE_DIR={SPIRV_HEADERS_SRC.as_posix()}",
     ]
     print(f"\n$ {' '.join(configure)}", flush=True)
     if subprocess.run(configure, cwd=str(REPO_ROOT)).returncode != 0:
