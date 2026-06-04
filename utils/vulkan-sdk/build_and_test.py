@@ -44,11 +44,15 @@ SPIRV_CMAKE_FLAGS = [
     "-DENABLE_SPIRV_CODEGEN=ON",
     "-DSPIRV_BUILD_TESTS=ON",
     "-DLLVM_ENABLE_WERROR=On",
-    # DXC normally sets SPIRV_SKIP_EXECUTABLES=ON (it only needs the SPIRV-Tools
-    # library). Override it (the set() in external/CMakeLists.txt is non-FORCE) so
-    # the standalone spirv-val executable is built and shipped in the RC.
-    "-DSPIRV_SKIP_EXECUTABLES=OFF",
 ]
+# spirv-val is built separately, from a standalone SPIRV-Tools configure (see
+# build_spirv_val). DXC's in-tree build can't compile the SPIRV-Tools executables:
+# its global CMAKE_INCLUDE_CURRENT_DIR puts each target's source dir on the include
+# path, so tools/io.cpp's `#include <io.h>` picks up SPIRV-Tools' own tools/io.h
+# instead of the CRT header. A separate configure (no that flag) builds it cleanly,
+# and we drop the binary into build/bin so the SPIR-V tests find it on PATH.
+SPIRV_TOOLS_SRC = REPO_ROOT / "external" / "SPIRV-Tools"
+SPIRV_HEADERS_SRC = REPO_ROOT / "external" / "SPIRV-Headers"
 
 # Built unconditionally; a failure here is fatal (no binary => no release candidate).
 # lit.cfg registers substitutions for the whole DX tool family (%dxc %dxv %dxa
@@ -58,8 +62,7 @@ SPIRV_CMAKE_FLAGS = [
 # also shells out to llvm-config, and error-path RUN lines use `not`/`count`.
 # ClangSPIRVTests is the gtest suite.
 REQUIRED_TARGETS = ["dxc", "dxv", "dxa", "dxopt", "dxr", "dxl",
-                    "FileCheck", "llvm-config", "not", "count",
-                    "spirv-val", "ClangSPIRVTests"]
+                    "FileCheck", "llvm-config", "not", "count", "ClangSPIRVTests"]
 if sys.platform == "win32":
     REQUIRED_TARGETS.append("dxc_batch")  # %batch substitution, Windows-only
 # Best-effort: ClangHLSLTests hosts the TAEF SPIR-V tests. If it fails to build we
@@ -125,6 +128,39 @@ def find_file(build_dir, name):
     for path in build_dir.rglob(name):
         return path
     return None
+
+
+def build_spirv_val(main_build_dir, jobs):
+    """Build spirv-val from a standalone SPIRV-Tools configure and drop it into
+    build/bin so the SPIR-V tests can invoke it on PATH. Best-effort: a failure is
+    logged but does not abort the pipeline (it can't build in-tree -- see the note
+    on SPIRV_TOOLS_SRC above). Returns the path to the binary, or None."""
+    if not SPIRV_TOOLS_SRC.is_dir() or not SPIRV_HEADERS_SRC.is_dir():
+        print("(spirv-val: SPIRV-Tools/SPIRV-Headers not checked out; skipping)")
+        return None
+    st_build = main_build_dir / "spirv-tools-standalone"
+    configure = [
+        "cmake", "-S", str(SPIRV_TOOLS_SRC), "-B", str(st_build), "-GNinja",
+        "-DCMAKE_BUILD_TYPE=Release", "-DSPIRV_SKIP_TESTS=ON",
+        f"-DSPIRV-Headers_SOURCE_DIR={SPIRV_HEADERS_SRC}",
+    ]
+    print(f"\n$ {' '.join(configure)}", flush=True)
+    if subprocess.run(configure, cwd=str(REPO_ROOT)).returncode != 0:
+        print("WARNING: standalone SPIRV-Tools configure failed; spirv-val unavailable.")
+        return None
+    if not build_optional(st_build, "spirv-val", jobs):
+        print("WARNING: standalone spirv-val build failed; spirv-val unavailable.")
+        return None
+
+    exe = find_file(st_build, "spirv-val.exe") or find_file(st_build, "spirv-val")
+    if not exe:
+        print("WARNING: standalone build produced no spirv-val binary.")
+        return None
+    dest = main_build_dir / "bin" / exe.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(exe, dest)
+    print(f"spirv-val -> {dest}")
+    return dest
 
 
 # --------------------------------------------------------------------------- #
@@ -276,6 +312,8 @@ def main(argv=None):
         build(build_dir, REQUIRED_TARGETS, args.jobs)  # fatal on failure
         for target in OPTIONAL_TARGETS:
             build_optional(build_dir, target, args.jobs)
+        # spirv-val, built standalone and dropped into build/bin (on the tests' PATH).
+        build_spirv_val(build_dir, args.jobs)
 
     # Run every SPIR-V harness. Each is independent and non-fatal.
     suites = [suite_gtest(build_dir), suite_lit(build_dir), suite_taef(build_dir)]
