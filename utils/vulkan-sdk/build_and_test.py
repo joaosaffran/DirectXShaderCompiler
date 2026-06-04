@@ -233,6 +233,56 @@ def suite_taef(build_dir):
                   None, proc.returncode)
 
 
+# Trivially-valid shaders, one per stage, used to exercise the standalone
+# spirv-val explicitly. (The CodeGenSPIRV corpus validates in-process via the
+# linked SPIRV-Tools library and never shells out to spirv-val, so without this
+# the spirv-val binary is built but never actually runs.)
+SPIRV_VAL_SHADERS = [
+    ("ps_6_0", "float4 main() : SV_Target { return float4(1, 0, 0, 1); }"),
+    ("vs_6_0", "float4 main(float4 p : POSITION) : SV_Position { return p; }"),
+    ("cs_6_0", "[numthreads(1, 1, 1)] void main() { }"),
+]
+
+
+def suite_spirv_val(build_dir):
+    """Compile shaders with the built dxc and validate the SPIR-V with the
+    standalone spirv-val -- an explicit, logged validator run against dxc output."""
+    spirv_val = (find_file(build_dir / "bin", "spirv-val.exe")
+                 or find_file(build_dir, "spirv-val.exe") or find_file(build_dir, "spirv-val"))
+    dxc = (find_file(build_dir / "bin", "dxc.exe")
+           or find_file(build_dir, "dxc.exe") or find_file(build_dir, "dxc"))
+    if not spirv_val:
+        return _suite("spirv-val", "spirv-val", "skipped", note="spirv-val not built")
+    if not dxc:
+        return _suite("spirv-val", "spirv-val", "skipped", note="dxc not found")
+
+    # Print the version first so the log unambiguously shows spirv-val running.
+    _capture([str(spirv_val), "--version"])
+
+    tmp = build_dir / "spirv-val-tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    passed = failed = 0
+    failed_tests = []
+    for i, (profile, src) in enumerate(SPIRV_VAL_SHADERS):
+        hlsl = tmp / f"case{i}_{profile}.hlsl"
+        spv = tmp / f"case{i}_{profile}.spv"
+        hlsl.write_text(src)
+        comp = _capture([str(dxc), "-T", profile, "-E", "main", "-spirv",
+                         "-fspv-target-env=vulkan1.0", "-Fo", str(spv), str(hlsl)])
+        if comp.returncode != 0 or not spv.is_file():
+            failed += 1
+            failed_tests.append(f"{profile}:compile")
+            continue
+        val = _capture([str(spirv_val), "--target-env", "vulkan1.0", str(spv)])
+        if val.returncode == 0:
+            passed += 1
+        else:
+            failed += 1
+            failed_tests.append(f"{profile}:validate")
+    return _suite("spirv-val", "spirv-val", "ran", passed, failed,
+                  passed + failed, failed_tests, 0 if failed == 0 else 1)
+
+
 def _capture(cmd, env=None):
     print(f"\n$ {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, cwd=str(REPO_ROOT), text=True,
@@ -319,7 +369,8 @@ def main(argv=None):
         build_spirv_val(build_dir, args.jobs)
 
     # Run every SPIR-V harness. Each is independent and non-fatal.
-    suites = [suite_gtest(build_dir), suite_lit(build_dir), suite_taef(build_dir)]
+    suites = [suite_gtest(build_dir), suite_lit(build_dir), suite_taef(build_dir),
+              suite_spirv_val(build_dir)]
     manifest = write_manifest(build_dir, git_head(), suites)
 
     print("\n=== SPIR-V test summary ===")
