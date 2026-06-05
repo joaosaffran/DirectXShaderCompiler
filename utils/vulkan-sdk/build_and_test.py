@@ -203,13 +203,25 @@ def suite_lit(build_dir):
     xml = build_dir / "spirv-codegen-results.xml"
     proc = _capture([sys.executable, str(litpy), "-v", "--no-progress-bar",
                      f"--xunit-xml-output={xml}", str(CODEGEN_SPIRV_DIR)])
-    passed = _int(re.search(r"Passed\s*:\s*(\d+)", proc.stdout))
-    failed = _int(re.search(r"Failed\s*:\s*(\d+)", proc.stdout))
-    # lit prints "FAIL: DXC :: CodeGenSPIRV/foo.hlsl (n of m)"
-    names = _dedup(re.findall(r"^(?:FAIL|UNRESOLVED|TIMEOUT): .*?:: (\S+)",
-                              proc.stdout, re.MULTILINE))
-    return _suite("spirv-codegen", "lit", "ran", passed, failed,
-                  (passed or 0) + (failed or 0), names, proc.returncode)
+    out = proc.stdout
+
+    def tally(label):
+        m = re.search(rf"{label}\s*:\s*(\d+)", out)
+        return int(m.group(1)) if m else 0
+
+    # lit's summary uses "Expected Passes", "Unexpected Failures", etc. -- NOT
+    # plain "Passed"/"Failed". XFAIL (Expected Failures) and Unsupported are not
+    # failures; XPASS (Unexpected Passes), Unresolved and Timed Out are.
+    passed = tally("Expected Passes")
+    failed = (tally("Unexpected Failures") + tally("Unexpected Passes")
+              + tally("Unresolved Tests") + tally("Timed Out Tests"))
+    # Names of the genuinely-bad results (FAIL / XPASS / UNRESOLVED / TIMEOUT).
+    names = _dedup(re.findall(r"^(?:FAIL|XPASS|UNRESOLVED|TIMEOUT): .*?:: (\S+)",
+                              out, re.MULTILINE))
+    ran = bool(re.search(r"Expected Passes\s*:|Testing Time:", out))
+    return _suite("spirv-codegen", "lit", "ran" if ran else "skipped",
+                  passed, failed, passed + failed, names, proc.returncode,
+                  note=None if ran else "no lit summary found")
 
 
 def suite_taef(build_dir):
