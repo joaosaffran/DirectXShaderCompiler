@@ -18,6 +18,11 @@ on:
       - "release/vulkan/**"
   workflow_dispatch:
     # Lets a maintainer kick off an RC build by hand for any ref.
+    inputs:
+      refresh_deps:
+        description: "Refresh SPIRV-Headers/SPIRV-Tools to the latest upstream commit (off = use the pinned commits)."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,6 +41,18 @@ jobs:
         with:
           # Submodules are checked out explicitly by sync_deps.py at pinned SHAs.
           submodules: false
+
+      # The SDK version is the trailing segment of the release/vulkan/<version>
+      # branch; it names the published artifact (dxc_rc_<version>).
+      - name: Determine SDK version
+        id: version
+        shell: bash
+        run: |
+          ref="${{ github.ref_name }}"
+          version="${ref#release/vulkan/}"   # strip the branch prefix if present
+          version="${version//\//-}"          # sanitize any remaining slashes
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "SDK version: $version"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -70,8 +87,20 @@ jobs:
           "TAEF_INCLUDE_DIR=$($inc.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "TAEF $env:TAEF_VERSION: TE.exe=$($te.FullName)  include=$($inc.Directory.FullName)"
 
+      # Per the spec (INF-0007): a newly created release/vulkan/** branch refreshes
+      # the SPIR-V deps to the latest upstream commit automatically; a manual run
+      # only refreshes when asked (refresh_deps), otherwise it reuses the pinned
+      # commits. github.event.created is true only when this push created the branch.
       - name: Sync SPIR-V dependencies to known_good.json
-        run: python utils/vulkan-sdk/sync_deps.py
+        shell: bash
+        run: |
+          if [ "${{ github.event.created }}" = "true" ] || [ "${{ inputs.refresh_deps }}" = "true" ]; then
+            echo "Refreshing SPIRV-Headers/SPIRV-Tools to latest upstream and recording in known_good.json."
+            python utils/vulkan-sdk/sync_deps.py --bump
+          else
+            echo "Using the commits pinned in known_good.json."
+          fi
+          python utils/vulkan-sdk/sync_deps.py
 
       # --allow-test-failures: record failures in the manifest but still exit 0,
       # so a test regression doesn't block publishing the candidate. Gate on the
@@ -86,7 +115,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dxc-vulkan-sdk-rc
+          name: dxc_rc_${{ steps.version.outputs.version }}
           # The dxc binary, the manifest (dxc commit + pinned SPIR-V deps +
           # per-suite pass/fail counts + validated flag), and the per-harness
           # JUnit reports. Downstream pipelines read rc-manifest.json.

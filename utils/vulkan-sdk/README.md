@@ -25,7 +25,10 @@ The pipeline runs on every push to a `release/vulkan/<version>` branch
 1. **Sync** — `sync_deps.py` checks out `external/SPIRV-Headers` and
    `external/SPIRV-Tools` at the exact commits pinned in
    [`known_good.json`](known_good.json). Deterministic and the single source of
-   truth for "which SPIR-V are we shipping."
+   truth for "which SPIR-V are we shipping." When the run was triggered by
+   *creating* a `release/vulkan/**` branch (or a manual run with `refresh_deps`
+   set), the workflow first runs `sync_deps.py --bump` to advance those pins to the
+   latest upstream commit; ordinary manual runs reuse the pinned commits.
 2. **Build** — `build_and_test.py` configures DXC with `ENABLE_SPIRV_CODEGEN=ON`
    `SPIRV_BUILD_TESTS=ON` (same flags as the existing GCP build) and builds `dxc`.
    On Windows the configure also needs TAEF (DXC's test framework); the workflow
@@ -52,16 +55,19 @@ The pipeline runs on every push to a `release/vulkan/<version>` branch
 
 ## Bumping the pinned versions
 
-To advance to the latest candidate before cutting a release branch:
+Creating a `release/vulkan/<version>` branch bumps the pins to the latest upstream
+commit automatically (the workflow runs `sync_deps.py --bump`), so the common case
+needs no manual step. A manual run only bumps when dispatched with `refresh_deps`
+set; otherwise it reuses the pinned commits, so a candidate can be reproduced
+exactly.
+
+To bump and review locally before cutting a branch:
 
 ```sh
 python utils/vulkan-sdk/sync_deps.py --bump   # fetch branch tips, rewrite known_good.json
 git diff utils/vulkan-sdk/known_good.json     # review the new SHAs
 python utils/vulkan-sdk/build_and_test.py     # build + validate locally
 ```
-
-Then commit `known_good.json` onto a `release/vulkan/<version>` branch and let
-the pipeline produce the validated RC.
 
 ## Run it locally
 
