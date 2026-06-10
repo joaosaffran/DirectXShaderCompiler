@@ -41,7 +41,7 @@ jobs:
       TAEF_FEED: "https://pkgs.dev.azure.com/shine-oss/terminal/_packaging/TerminalDependencies%40Local/nuget/v3/index.json"
       # Repository whose offload-test-suite consumer we notify with the RC (point
       # at a fork while testing the chain).
-      OFFLOAD_TESTS_REPO: "llvm/offload-test-suite"
+      OFFLOAD_TESTS_REPO: "joaosaffran/offload-test-suite"
     steps:
       - name: Checkout DXC
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
