@@ -133,12 +133,18 @@ jobs:
           if-no-files-found: warn
 
       - name: Trigger offload-test-suite (DXC Vulkan tests on all GPUs)
-        if: ${{ (github.event.created || inputs.dispatch_offload_tests) && secrets.OFFLOAD_TESTS_DISPATCH_TOKEN != '' }}
+        if: ${{ github.event.created || inputs.dispatch_offload_tests }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.OFFLOAD_TESTS_DISPATCH_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # No-op when the cross-repo dispatch token isn't configured (e.g. forks).
+          # secrets can't be used in an `if:`, so we guard here instead.
+          if [ -z "$GH_TOKEN" ]; then
+            echo "OFFLOAD_TESTS_DISPATCH_TOKEN not set; skipping offload dispatch."
+            exit 0
+          fi
           jq -n \
             --arg repo "$GITHUB_REPOSITORY" \
             --arg run_id "$GITHUB_RUN_ID" \
