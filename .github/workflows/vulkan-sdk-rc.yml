@@ -23,6 +23,10 @@ on:
         description: "Refresh SPIRV-Headers/SPIRV-Tools to the latest upstream commit (off = use the pinned commits)."
         type: boolean
         default: false
+      dispatch_offload_tests:
+        description: "Dispatch the offload-test-suite DXC Vulkan tests for this candidate."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,6 +39,9 @@ jobs:
       # Not on nuget.org -- served from the public feed microsoft/terminal uses.
       TAEF_VERSION: "10.100.251104001"
       TAEF_FEED: "https://pkgs.dev.azure.com/shine-oss/terminal/_packaging/TerminalDependencies%40Local/nuget/v3/index.json"
+      # Repository whose offload-test-suite consumer we notify with the RC (point
+      # at a fork while testing the chain).
+      OFFLOAD_TESTS_REPO: "llvm/offload-test-suite"
     steps:
       - name: Checkout DXC
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -124,3 +131,20 @@ jobs:
             build/rc-manifest.json
             build/spirv-*-results.xml
           if-no-files-found: warn
+
+      - name: Trigger offload-test-suite (DXC Vulkan tests on all GPUs)
+        if: ${{ (github.event.created || inputs.dispatch_offload_tests) && secrets.OFFLOAD_TESTS_DISPATCH_TOKEN != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.OFFLOAD_TESTS_DISPATCH_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          jq -n \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg version "$VERSION" \
+            '{event_type: "dxc-rc",
+              client_payload: {repo: $repo, run_id: $run_id, version: $version,
+                               artifact: ("dxc_rc_" + $version)}}' \
+            | gh api "repos/$OFFLOAD_TESTS_REPO/dispatches" --input -
+          echo "Dispatched dxc-rc to $OFFLOAD_TESTS_REPO (version $VERSION, run $GITHUB_RUN_ID)."
