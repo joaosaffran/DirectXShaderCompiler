@@ -18,7 +18,8 @@ release candidate regardless; the manifest's top-level "validated" is true only
 when every suite ran and passed.
 
 The cmake flags mirror the existing GCP build (gcp-pipelines/x86_64-linux-clang.yml).
-Stdlib only. Intended to run after sync_deps.py has pinned the submodules.
+Stdlib only. Builds whatever the SPIRV-Headers/SPIRV-Tools submodules are checked
+out at -- the submodule pointers are the source of truth.
 """
 
 import argparse
@@ -322,8 +323,15 @@ def _dedup(seq):
 # --------------------------------------------------------------------------- #
 
 def read_pinned_commits():
-    kg = json.loads((Path(__file__).resolve().parent / "known_good.json").read_text())
-    return {d["name"]: d["commit"] for d in kg["dependencies"]}
+    """The SPIR-V dependency commits are whatever the submodules are checked out
+    at -- the submodule pointers are the source of truth."""
+    deps = {}
+    for name in ("SPIRV-Headers", "SPIRV-Tools"):
+        sub = REPO_ROOT / "external" / name
+        r = subprocess.run(["git", "-C", str(sub), "rev-parse", "HEAD"],
+                           text=True, capture_output=True)
+        deps[name] = r.stdout.strip() if r.returncode == 0 else "unknown"
+    return deps
 
 
 def git_head():

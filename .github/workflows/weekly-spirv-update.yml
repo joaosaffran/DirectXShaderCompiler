@@ -1,0 +1,59 @@
+name: "Weekly SPIR-V submodule update"
+
+# Once a week, bump the SPIRV-Headers / SPIRV-Tools submodules to their latest
+# upstream commit and cut a release/vulkan/weekly-<date> branch carrying that bump.
+# The submodule pointers are the source of truth for which SPIR-V DXC ships.
+#
+# Creating that branch triggers the "Vulkan SDK release candidate" pipeline, which
+# builds + tests DXC against the new SPIR-V and -- because the push creates the
+# branch (github.event.created) -- dispatches the offload-test-suite Vulkan tests.
+# So this workflow only has to produce the commit; the RC pipeline does the rest.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout DXC
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          # Push with a PAT, not GITHUB_TOKEN: pushes made with GITHUB_TOKEN do
+          # not trigger other workflows, and we need the new branch to trigger the
+          # RC pipeline. WEEKLY_BUMP_TOKEN needs contents:write on this repo.
+          token: ${{ secrets.WEEKLY_BUMP_TOKEN }}
+
+      - name: Bump SPIR-V submodules to latest upstream
+        id: bump
+        run: |
+          git submodule update --remote external/SPIRV-Headers external/SPIRV-Tools
+          if git diff --quiet -- external/SPIRV-Headers external/SPIRV-Tools; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "SPIR-V submodules already at latest upstream; nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "SPIRV-Headers -> $(git -C external/SPIRV-Headers rev-parse HEAD)"
+            echo "SPIRV-Tools   -> $(git -C external/SPIRV-Tools rev-parse HEAD)"
+          fi
+
+      # Commit the bumped pointers onto a fresh release branch. The push triggers
+      # vulkan-sdk-rc.yml (build + test + publish + offload dispatch).
+      - name: Cut release branch with the bump
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          date="$(date -u +%Y%m%d)"
+          branch="release/vulkan/weekly-$date"
+          git config user.name "dxc-rc-bot"
+          git config user.email "dxc-rc-bot@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add external/SPIRV-Headers external/SPIRV-Tools
+          git commit -m "Weekly SPIR-V submodule bump ($date)"
+          git push origin "$branch"
+          echo "Pushed $branch — the RC pipeline will build, test and dispatch offload."
