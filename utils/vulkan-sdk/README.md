@@ -3,83 +3,75 @@
 A prototype for [hlsl-specs#878](https://github.com/microsoft/hlsl-specs/issues/878)
 / INF-0007. It automates the DXC-owned slice of the LunarG Vulkan SDK release
 checklist: keeping DXC's SPIR-V dependencies current, building DXC for SPIR-V,
-validating its output, and publishing a release candidate for downstream
-pipelines.
+validating its output, and producing a candidate for downstream testing.
 
-## The DXC slice of the SDK release
+## Source of truth
 
-Of the full LunarG checklist, only a few steps are DXC's responsibility:
+The `external/SPIRV-Headers` and `external/SPIRV-Tools` **submodule pointers** are
+the single source of truth for which SPIR-V DXC is built against. There is no
+separate pin file — whatever the submodules are committed at is what gets built,
+tested, and shipped.
 
-| SDK phase            | Manual step today                                              | Automated by |
-|----------------------|---------------------------------------------------------------|--------------|
-| Toolchain RC         | Update SPIRV-Headers + SPIRV-Tools deps in DXC                 | `sync_deps.py` |
-| Toolchain RC         | Test the SPIRV-Tools RC against DXC                            | `build_and_test.py` |
-| Toolchain RC         | Communicate the resulting DXC commit ID to LunarG             | `rc-manifest.json` artifact |
-| Code freeze / release| Record + publish the frozen DXC commit for SDK builders       | workflow artifact |
+## The two workflows
 
-## How it works
+**`weekly-spirv-update.yml`** — runs on a weekly schedule (and on demand). It bumps
+the SPIRV-Headers / SPIRV-Tools submodules to their latest upstream commit and, if
+anything changed, commits that bump onto a fresh `release/vulkan/weekly-<date>`
+branch and opens a PR against the default branch. Pushing the branch triggers the
+pipeline below; its build/test checks attach to the commit and show on the PR, so
+the bump is merged only once the candidate is green. (It uses a PAT —
+`WEEKLY_BUMP_TOKEN`, contents:write + pull-requests:write — because pushes/PRs made
+with the default `GITHUB_TOKEN` don't trigger other workflows.)
 
-The pipeline runs on every push to a `release/vulkan/<version>` branch
-(`.github/workflows/vulkan-sdk-rc.yml`):
+**`vulkan-sdk-rc.yml`** — runs on every push to a `release/vulkan/<version>` branch:
 
-1. **Sync** — `sync_deps.py` checks out `external/SPIRV-Headers` and
-   `external/SPIRV-Tools` at the exact commits pinned in
-   [`known_good.json`](known_good.json). Deterministic and the single source of
-   truth for "which SPIR-V are we shipping." When the run was triggered by
-   *creating* a `release/vulkan/**` branch (or a manual run with `refresh_deps`
-   set), the workflow first runs `sync_deps.py --bump` to advance those pins to the
-   latest upstream commit; ordinary manual runs reuse the pinned commits.
+1. **Checkout** the repo with `submodules: true`, so DXC builds against exactly the
+   SPIR-V the submodule pointers name.
 2. **Build** — `build_and_test.py` configures DXC with `ENABLE_SPIRV_CODEGEN=ON`
-   `SPIRV_BUILD_TESTS=ON` (same flags as the existing GCP build) and builds `dxc`.
-   On Windows the configure also needs TAEF (DXC's test framework); the workflow
-   restores the `Microsoft.Taef` nuget package (from the public feed
-   microsoft/terminal uses — it's not on nuget.org) and exports `TAEF_INCLUDE_DIR`
-   + `TAEF_EXECUTABLE`, which `build_and_test.py` forwards to pre-seed
-   `FindTAEF.cmake`. No DXC tests are disabled.
-3. **Validate** — it runs *every* SPIR-V test, across all three harnesses:
-   - **gtest** `ClangSPIRVTests` — the SPIR-V backend unit suite (links
-     `SPIRV-Tools`, runs `spirv-val`).
-   - **lit** `tools/clang/test/CodeGenSPIRV/` — the ~1300-file FileCheck codegen
-     corpus, driven through the built `dxc`.
-   - **TAEF** the SPIR-V tests in `ClangHLSLTests` (e.g. `RewriterTest::RunSpirv`),
-     selected by a `*Spirv*` name filter.
+   `SPIRV_BUILD_TESTS=ON` and builds `dxc`. On Windows the configure also needs
+   TAEF (DXC's test framework); the workflow restores the `Microsoft.Taef` nuget
+   package (from the public feed microsoft/terminal uses — not on nuget.org) and
+   pre-seeds `FindTAEF.cmake`. No DXC tests are disabled.
+3. **Validate** — runs every SPIR-V test the DXC repo provides — the lit tests, the
+   TAEF tests, and the googletest unit tests — plus a standalone `spirv-val` check
+   of dxc's output. Each is non-fatal; per-suite results and a top-level
+   `validated` flag are recorded in `rc-manifest.json` (`--allow-test-failures`
+   keeps failures from blocking publication).
+4. **Publish & dispatch** — uploads the `dxc` binary, `rc-manifest.json` (DXC commit
+   + the submodule SPIR-V commits + per-suite results + `validated`), and the JUnit
+   reports as the `dxc_rc_<version>` artifact. On branch creation it also fires a
+   `repository_dispatch` to the offload-test-suite consumer.
 
-   Each harness runs independently and is non-fatal; per-suite pass/fail counts
-   and failing test names are recorded in the manifest. The top-level `validated`
-   flag is true only when every suite ran and passed. `--allow-test-failures`
-   keeps failures from blocking publication.
-4. **Publish** — the `dxc` binary, `rc-manifest.json` (DXC commit + pinned SPIR-V
-   commits + per-suite results + `validated` flag), and the per-harness JUnit
-   reports are uploaded as an artifact other pipelines (shaderc, glslang, …)
-   can consume.
+So the weekly bump → branch → build/test → offload dispatch chain is fully
+automatic; the submodule commit is the candidate.
 
-## Bumping the pinned versions
+## Bumping the submodules manually
 
-Creating a `release/vulkan/<version>` branch bumps the pins to the latest upstream
-commit automatically (the workflow runs `sync_deps.py --bump`), so the common case
-needs no manual step. A manual run only bumps when dispatched with `refresh_deps`
-set; otherwise it reuses the pinned commits, so a candidate can be reproduced
-exactly.
-
-To bump and review locally before cutting a branch:
+The weekly job does this for you, but to bump + review locally:
 
 ```sh
-python utils/vulkan-sdk/sync_deps.py --bump   # fetch branch tips, rewrite known_good.json
-git diff utils/vulkan-sdk/known_good.json     # review the new SHAs
-python utils/vulkan-sdk/build_and_test.py     # build + validate locally
+git submodule update --remote external/SPIRV-Headers external/SPIRV-Tools
+git diff --submodule -- external/SPIRV-Headers external/SPIRV-Tools   # review the bump
+python utils/vulkan-sdk/build_and_test.py --build-dir build           # build + validate
 ```
 
 ## Run it locally
 
 ```sh
-python utils/vulkan-sdk/sync_deps.py
+git submodule update --init external/SPIRV-Headers external/SPIRV-Tools
 python utils/vulkan-sdk/build_and_test.py --build-dir build
 ```
+
+## Downstream: execution on Vulkan (OffloadTest)
+
+`offload-test-suite-dxc-rc.yaml` (a prototype meant to live in
+`llvm/offload-test-suite`) receives the `dxc-rc` dispatch, downloads the RC's `dxc`
+binary, and runs the DXC Vulkan offload tests (`check-hlsl-vk`) across the GPU
+providers — actually executing shaders on a device. See the cross-repo token notes
+in that file's header.
 
 ## Not yet prototyped (discussion points for the spec)
 
 - Tagging the validated commit `vulkan-sdk-X.Y.ZZZ.w` and aligning it with a
   formal DXC GitHub/NuGet release (the Godbolt goal in INF-0007).
 - Publishing to a durable, cross-org consumable location (vs. a workflow artifact).
-- A scheduled "build DXC against SPIR-V tip nightly" job so regressions surface
-  before an RC is ever requested.
