@@ -1,0 +1,68 @@
+name: "Weekly SPIR-V submodule update"
+
+# Keeps DXC's SPIR-V dependencies current. Once a week (or on demand) it bumps the
+# SPIRV-Headers / SPIRV-Tools submodules to their latest upstream commit and, if
+# anything changed, opens a PR on a vk-update/<date> branch. The submodule pointers
+# are the source of truth for which SPIR-V DXC ships.
+#
+# Pushing that branch triggers the "Vulkan SDK release candidate" pipeline
+# (vulkan-sdk-rc.yml), which builds + tests DXC against the new SPIR-V; its checks
+# land on the PR, so the bump is merged only when green. This workflow only produces
+# the commit + PR; the RC pipeline does the build/test.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout DXC
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          # Push with a PAT, not GITHUB_TOKEN: pushes made with GITHUB_TOKEN do not
+          # trigger other workflows, and we need the vk-update branch to trigger the
+          # RC pipeline. WEEKLY_BUMP_TOKEN needs contents:write + pull-requests:write.
+          token: ${{ secrets.WEEKLY_BUMP_TOKEN }}
+
+      - name: Bump SPIR-V submodules to latest upstream
+        id: bump
+        run: |
+          git submodule update --remote external/SPIRV-Headers external/SPIRV-Tools
+          if git diff --quiet -- external/SPIRV-Headers external/SPIRV-Tools; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "SPIR-V submodules already at latest upstream; nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "SPIRV-Headers -> $(git -C external/SPIRV-Headers rev-parse HEAD)"
+            echo "SPIRV-Tools   -> $(git -C external/SPIRV-Tools rev-parse HEAD)"
+          fi
+
+      # Commit the bumped pointers onto a fresh vk-update branch and open a PR against
+      # the default branch. Pushing the branch triggers vulkan-sdk-rc.yml; its checks
+      # attach to this commit and show on the PR.
+      - name: Open PR with the bump
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.WEEKLY_BUMP_TOKEN }}
+        run: |
+          date="$(date -u +%Y%m%d)"
+          branch="vk-update/$date"
+          git config user.name "dxc-rc-bot"
+          git config user.email "dxc-rc-bot@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add external/SPIRV-Headers external/SPIRV-Tools
+          git commit -m "Weekly SPIR-V submodule bump ($date)"
+          git push origin "$branch"
+          gh pr create \
+            --base "${{ github.event.repository.default_branch }}" \
+            --head "$branch" \
+            --title "Weekly SPIR-V submodule bump ($date)" \
+            --body "Automated weekly bump of SPIRV-Headers and SPIRV-Tools to the latest upstream commit. The release-candidate pipeline (build + SPIR-V tests) runs on this branch and reports here; merge once the candidate is green." \
+            || echo "PR for $branch may already exist; skipping create."

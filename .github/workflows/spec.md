@@ -34,13 +34,13 @@ releases and can be ingested into Godbolt.
 
 The SPIRV-Headers and SPIRV-Tools submodule pointers are the single source of truth
 for which SPIRV revisions a candidate is built against; there is no separate pin
-file. A single pipeline serves the whole process through three triggers. On a weekly
-schedule it advances the submodules to the latest upstream commit and opens a pull
-request on a `vk-update/<date>` branch; pushing that branch builds and tests DXC,
-and the results surface on the pull request, so the bump is merged only once it is
-green. When an SDK release is being prepared, the same pipeline runs against a
-`release/vulkan/<version>` branch and additionally publishes the candidate as a
-build artifact and runs the LLVM offload-test-suite against it on software renderers
+file. A weekly job advances the submodules to the latest upstream commit and opens a
+pull request on a `vk-update/<date>` branch; pushing that branch runs the
+release-candidate pipeline, which builds and tests DXC, and the results surface on
+the pull request, so the bump is merged only once it is green. When an SDK release is
+being prepared, the pipeline runs against a `release/vulkan/<version>` branch and
+additionally publishes the candidate as a build artifact and runs the LLVM
+offload-test-suite against it on software renderers
 — WARP for D3D12 and lavapipe for Vulkan — so its shaders are actually executed
 without a physical GPU. The pipeline can also be started manually. The SDK builders
 do not consume the artifact; they are given the candidate's DXC commit, which the

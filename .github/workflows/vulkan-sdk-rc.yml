@@ -2,34 +2,24 @@ name: "Vulkan SDK release candidate"
 
 # Prototype for INF-0007: prepare + validate DXC for a Vulkan SDK release.
 #
-# One pipeline, three triggers:
-#   * schedule (weekly) -- runs the `bump` job: advances the SPIRV-Headers /
-#     SPIRV-Tools submodules to latest upstream and opens a PR on a vk-update/<date>
-#     branch. Pushing that branch runs build-and-validate, so the bump's test
-#     results land on the PR and it is merged only when green.
-#   * push to vk-update/** or release/vulkan/** -- runs build-and-validate: builds
-#     DXC against the checked-out submodule pointers (the source of truth for which
-#     SPIR-V ships) and runs every SPIR-V test (lit / TAEF / googletest) + spirv-val.
-#   * workflow_dispatch -- manual. `update_deps` runs the bump instead of building;
-#     otherwise it builds, with `publish_artifact` controlling the deliverable.
+# Builds DXC against the checked-out SPIRV-Headers / SPIRV-Tools submodule pointers
+# (the source of truth for which SPIR-V ships) and runs every SPIR-V test
+# (lit / TAEF / googletest) + spirv-val. Triggers:
+#   * push to vk-update/** or release/vulkan/** -- the weekly-spirv-update workflow
+#     opens vk-update PRs; release/vulkan branches are cut by hand for a release.
+#   * workflow_dispatch -- manual run for any ref.
 #
 # The dxc_rc_<version> artifact and the offload-test-suite run (WARP + lavapipe) are
 # the release-candidate deliverable -- produced only on release/vulkan/** pushes or
-# a manual opt-in, not on the weekly vk-update validation runs.
+# a manual opt-in (publish_artifact), not on the weekly vk-update validation runs.
 
 on:
   push:
     branches:
       - "release/vulkan/**"
       - "vk-update/**"
-  schedule:
-    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
   workflow_dispatch:
     inputs:
-      update_deps:
-        description: "Bump SPIRV-Headers/SPIRV-Tools to latest upstream and open a PR (instead of building)."
-        type: boolean
-        default: false
       publish_artifact:
         description: "Upload the dxc_rc artifact (and run the offload tests) for this build."
         type: boolean
@@ -39,64 +29,7 @@ permissions:
   contents: read
 
 jobs:
-  # Weekly (or manual) dependency bump. Advances the SPIR-V submodules and opens a
-  # PR on vk-update/<date>; pushing that branch drives build-and-validate below.
-  bump:
-    # workflow_dispatch boolean inputs arrive as the STRINGS 'true'/'false', so
-    # compare against the string -- `&& inputs.update_deps` would treat 'false' as a
-    # truthy non-empty string.
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.update_deps == 'true') }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout DXC
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-          # Push with a PAT, not GITHUB_TOKEN: pushes made with GITHUB_TOKEN do not
-          # trigger other workflows, and we need the vk-update branch to trigger the
-          # build below. WEEKLY_BUMP_TOKEN needs contents:write + pull-requests:write.
-          token: ${{ secrets.WEEKLY_BUMP_TOKEN }}
-
-      - name: Bump SPIR-V submodules to latest upstream
-        id: bump
-        run: |
-          git submodule update --remote external/SPIRV-Headers external/SPIRV-Tools
-          if git diff --quiet -- external/SPIRV-Headers external/SPIRV-Tools; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "SPIR-V submodules already at latest upstream; nothing to do."
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "SPIRV-Headers -> $(git -C external/SPIRV-Headers rev-parse HEAD)"
-            echo "SPIRV-Tools   -> $(git -C external/SPIRV-Tools rev-parse HEAD)"
-          fi
-
-      # Commit the bumped pointers onto a fresh vk-update branch and open a PR against
-      # the default branch. Pushing the branch triggers build-and-validate; its checks
-      # attach to this commit and show on the PR.
-      - name: Open PR with the bump
-        if: steps.bump.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.WEEKLY_BUMP_TOKEN }}
-        run: |
-          date="$(date -u +%Y%m%d)"
-          branch="vk-update/$date"
-          git config user.name "dxc-rc-bot"
-          git config user.email "dxc-rc-bot@users.noreply.github.com"
-          git checkout -b "$branch"
-          git add external/SPIRV-Headers external/SPIRV-Tools
-          git commit -m "Weekly SPIR-V submodule bump ($date)"
-          git push origin "$branch"
-          gh pr create \
-            --base "${{ github.event.repository.default_branch }}" \
-            --head "$branch" \
-            --title "Weekly SPIR-V submodule bump ($date)" \
-            --body "Automated weekly bump of SPIRV-Headers and SPIRV-Tools to the latest upstream commit. The release-candidate pipeline (build + SPIR-V tests) runs on this branch and reports here; merge once the candidate is green." \
-            || echo "PR for $branch may already exist; skipping create."
-
   build-and-validate:
-    # Build on any push, and on a manual run unless it asked for the bump instead.
-    # (workflow_dispatch booleans are strings, so compare with != 'true'.)
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.update_deps != 'true') }}
     runs-on: windows-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
