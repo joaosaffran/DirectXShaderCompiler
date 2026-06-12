@@ -34,25 +34,59 @@ releases and can be ingested into Godbolt.
 
 The SPIRV-Headers and SPIRV-Tools submodule pointers are the single source of truth
 for which SPIRV revisions a candidate is built against; there is no separate pin
-file. A weekly job advances those submodules to the latest upstream commit and cuts
-a release branch, and a pipeline then builds, tests, and publishes that candidate
-as a build artifact for further testing. The SDK builders do not consume that
-artifact; they are given the candidate's DXC commit, which the manifest records.
+file. A single pipeline serves the whole process through three triggers. On a weekly
+schedule it advances the submodules to the latest upstream commit and opens a pull
+request on a `vk-update/<date>` branch; pushing that branch builds and tests DXC,
+and the results surface on the pull request, so the bump is merged only once it is
+green. When an SDK release is being prepared, the same pipeline runs against a
+`release/vulkan/<version>` branch and additionally publishes the candidate as a
+build artifact and runs the LLVM offload-test-suite against it on software renderers
+— WARP for D3D12 and lavapipe for Vulkan — so its shaders are actually executed
+without a physical GPU. The pipeline can also be started manually. The SDK builders
+do not consume the artifact; they are given the candidate's DXC commit, which the
+manifest records.
+
+```mermaid
+flowchart TD
+    schedule(["Weekly schedule"]) --> bump
+    bump["Bump SPIRV-Headers and SPIRV-Tools<br/>to latest upstream"] --> vkpr
+    vkpr(["vk-update PR"]) -->|branch push| build
+    release(["Release Steps:<br/>release/vulkan branch<br/>with LunarG's commits"]) -->|branch push| build
+
+    subgraph pipeline ["Pipeline — every push"]
+        direction TB
+        build["Build DXC against the submodule pointers"] --> test
+        test["Run all SPIRV tests:<br/>lit, googletest, TAEF, spirv-val"]
+    end
+
+    test -->|release branch<br/>or manual opt-in| publish
+    subgraph deliverable ["Release-candidate deliverable"]
+        direction TB
+        publish["Publish dxc_rc artifact + manifest"] --> offload
+        offload["Offload tests on software renderers:<br/>WARP (check-hlsl-warp-d3d12)<br/>lavapipe (check-hlsl-vk)"]
+    end
+
+    test -. build / test checks .-> vkpr
+    offload -. offload checks .-> release
+    vkpr --> merge(["Merge when green"])
+```
 
 ### Weekly dependency update
 
 A scheduled job runs once a week. It advances the SPIRV-Headers and SPIRV-Tools
 submodules to their latest upstream commit and, if anything changed, commits the
-new pointers onto a fresh `release/vulkan/<version>` branch and opens a pull
-request. Pushing that branch drives the pipeline below, and the candidate's results
-surface on the pull request, so the bump is merged only once it is green. Keeping
-DXC current against upstream SPIRV needs no manual step.
+new pointers onto a fresh `vk-update/<date>` branch and opens a pull request.
+Pushing that branch builds and tests DXC, and the results surface on the pull
+request, so the bump is merged only once it is green. Keeping DXC current against
+upstream SPIRV needs no manual step.
 
 ### Pipeline
 
-The pipeline runs on every push to a `release/vulkan/<version>` branch — the weekly
-job creates these, and they can also be cut by hand (see Release Steps) — and can
-be started manually from the GitHub UI. It performs the following actions:
+The pipeline runs on every push to a `vk-update/<date>` branch (the weekly job
+creates these) or a `release/vulkan/<version>` branch (cut by hand for a release;
+see Release Steps), and can be started manually from the GitHub UI. The build and
+test stages always run; the publish and offload stages run only for a release
+candidate — a `release/vulkan/<version>` branch, or a manual run that opts in.
 
 1. **Build.** DXC is checked out with its submodules, so it builds against exactly
    the SPIRV the pointers name, and configured with SPIRV code generation and the
@@ -62,12 +96,18 @@ be started manually from the GitHub UI. It performs the following actions:
 2. **Test.** All of the SPIRV tests available in the DXC repo are run in this
    stage: the lit tests, the googletest unit tests, and the TAEF tests. The
    generated code is also validated with `spirv-val`. This stage is non-blocking: a
-   release candidate is published as a pipeline artifact even if some tests fail.
+   release candidate is published even if some tests fail.
 
 3. **Publish.** The DXC binary, a machine-readable manifest, and the per-tool test
-   reports are published as a single artifact, named `dxc_rc_<version>`. When the
-   run was triggered by creating the branch, it also dispatches the
-   offload-test-suite Vulkan tests against the candidate across the GPU providers.
+   reports are published as a single artifact, named `dxc_rc_<version>`.
+
+4. **Offload tests.** A job runs the LLVM offload-test-suite against the candidate.
+   It clones the suite, builds it against the candidate's DXC binary, and runs its
+   tests on software renderers rather than physical GPUs: WARP for the D3D12 path
+   (`check-hlsl-warp-d3d12`) and lavapipe, Mesa's software Vulkan implementation,
+   for the Vulkan path (`check-hlsl-vk`). This actually executes the shaders the
+   candidate compiles, so the candidate is exercised end to end on a hosted runner
+   with no GPU hardware.
 
 ### Release manifest
 
@@ -113,4 +153,6 @@ ready for the Vulkan SDK.
   pinned to.
 * Every SPIRV testing tool passes, and the SPIRV the binary emits validates under
   `spirv-val`.
+* The shaders the candidate compiles execute on the offload-test-suite under both
+  software renderers (WARP for D3D12 and lavapipe for Vulkan).
 * The manifest records the result, with `validated` set to `true`.

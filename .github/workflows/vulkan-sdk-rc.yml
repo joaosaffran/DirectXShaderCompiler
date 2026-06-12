@@ -2,42 +2,105 @@ name: "Vulkan SDK release candidate"
 
 # Prototype for INF-0007: prepare + validate DXC for a Vulkan SDK release.
 #
-# Triggers on any release/vulkan/<version> branch. The SPIRV-Headers / SPIRV-Tools
-# submodule pointers are the source of truth for which SPIR-V is shipped; each push
-# to such a branch:
-#   1. Builds DXC for SPIR-V against the checked-out submodules.
-#   2. Runs every SPIR-V test (lit / TAEF / googletest) plus spirv-val.
-#   3. Publishes the result as an artifact, and on branch creation dispatches the
-#      offload-test-suite Vulkan tests.
+# One pipeline, three triggers:
+#   * schedule (weekly) -- runs the `bump` job: advances the SPIRV-Headers /
+#     SPIRV-Tools submodules to latest upstream and opens a PR on a vk-update/<date>
+#     branch. Pushing that branch runs build-and-validate, so the bump's test
+#     results land on the PR and it is merged only when green.
+#   * push to vk-update/** or release/vulkan/** -- runs build-and-validate: builds
+#     DXC against the checked-out submodule pointers (the source of truth for which
+#     SPIR-V ships) and runs every SPIR-V test (lit / TAEF / googletest) + spirv-val.
+#   * workflow_dispatch -- manual. `update_deps` runs the bump instead of building;
+#     otherwise it builds, with `publish_artifact` controlling the deliverable.
 #
-# The weekly-spirv-update workflow bumps the submodules and cuts these branches.
+# The dxc_rc_<version> artifact and the offload-test-suite run (WARP + lavapipe) are
+# the release-candidate deliverable -- produced only on release/vulkan/** pushes or
+# a manual opt-in, not on the weekly vk-update validation runs.
 
 on:
   push:
     branches:
       - "release/vulkan/**"
+      - "vk-update/**"
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
   workflow_dispatch:
-    # Lets a maintainer kick off an RC build by hand for any ref.
     inputs:
-      dispatch_offload_tests:
-        description: "Dispatch the offload-test-suite DXC Vulkan tests for this candidate."
+      update_deps:
+        description: "Bump SPIRV-Headers/SPIRV-Tools to latest upstream and open a PR (instead of building)."
         type: boolean
         default: false
+      publish_artifact:
+        description: "Upload the dxc_rc artifact (and run the offload tests) for this build."
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 jobs:
+  # Weekly (or manual) dependency bump. Advances the SPIR-V submodules and opens a
+  # PR on vk-update/<date>; pushing that branch drives build-and-validate below.
+  bump:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.update_deps) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout DXC
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          # Push with a PAT, not GITHUB_TOKEN: pushes made with GITHUB_TOKEN do not
+          # trigger other workflows, and we need the vk-update branch to trigger the
+          # build below. WEEKLY_BUMP_TOKEN needs contents:write + pull-requests:write.
+          token: ${{ secrets.WEEKLY_BUMP_TOKEN }}
+
+      - name: Bump SPIR-V submodules to latest upstream
+        id: bump
+        run: |
+          git submodule update --remote external/SPIRV-Headers external/SPIRV-Tools
+          if git diff --quiet -- external/SPIRV-Headers external/SPIRV-Tools; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "SPIR-V submodules already at latest upstream; nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "SPIRV-Headers -> $(git -C external/SPIRV-Headers rev-parse HEAD)"
+            echo "SPIRV-Tools   -> $(git -C external/SPIRV-Tools rev-parse HEAD)"
+          fi
+
+      # Commit the bumped pointers onto a fresh vk-update branch and open a PR against
+      # the default branch. Pushing the branch triggers build-and-validate; its checks
+      # attach to this commit and show on the PR.
+      - name: Open PR with the bump
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.WEEKLY_BUMP_TOKEN }}
+        run: |
+          date="$(date -u +%Y%m%d)"
+          branch="vk-update/$date"
+          git config user.name "dxc-rc-bot"
+          git config user.email "dxc-rc-bot@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add external/SPIRV-Headers external/SPIRV-Tools
+          git commit -m "Weekly SPIR-V submodule bump ($date)"
+          git push origin "$branch"
+          gh pr create \
+            --base "${{ github.event.repository.default_branch }}" \
+            --head "$branch" \
+            --title "Weekly SPIR-V submodule bump ($date)" \
+            --body "Automated weekly bump of SPIRV-Headers and SPIRV-Tools to the latest upstream commit. The release-candidate pipeline (build + SPIR-V tests) runs on this branch and reports here; merge once the candidate is green." \
+            || echo "PR for $branch may already exist; skipping create."
+
   build-and-validate:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.update_deps == false) }}
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.publish_gate.outputs.publish }}
     env:
       # TAEF test framework, restored from nuget (see the "Install TAEF" step).
       # Not on nuget.org -- served from the public feed microsoft/terminal uses.
       TAEF_VERSION: "10.100.251104001"
       TAEF_FEED: "https://pkgs.dev.azure.com/shine-oss/terminal/_packaging/TerminalDependencies%40Local/nuget/v3/index.json"
-      # Repository whose offload-test-suite consumer we notify with the RC (point
-      # at a fork while testing the chain).
-      OFFLOAD_TESTS_REPO: "joaosaffran/offload-test-suite"
     steps:
       - name: Checkout DXC
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -47,7 +110,8 @@ jobs:
           submodules: true
 
       # The SDK version is the trailing segment of the release/vulkan/<version>
-      # branch; it names the published artifact (dxc_rc_<version>).
+      # branch; it names the published artifact (dxc_rc_<version>). vk-update and
+      # other refs fall back to the sanitized ref name.
       - name: Determine SDK version
         id: version
         shell: bash
@@ -57,6 +121,22 @@ jobs:
           version="${version//\//-}"          # sanitize any remaining slashes
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "SDK version: $version"
+
+      # The artifact + offload run are the release-candidate deliverable: produced on
+      # release/vulkan/** pushes, or on a manual run that opts in. Weekly vk-update
+      # validation runs build + test only.
+      - name: Decide whether to publish the candidate
+        id: publish_gate
+        shell: bash
+        run: |
+          publish=false
+          if [[ "${{ github.ref }}" == refs/heads/release/vulkan/* ]]; then
+            publish=true
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.publish_artifact }}" == "true" ]]; then
+            publish=true
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "publish candidate (artifact + offload): $publish"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -98,41 +178,126 @@ jobs:
         run: python utils/vulkan-sdk/build_and_test.py --build-dir build --allow-test-failures
 
       - name: Upload release candidate
-        # always(): publish even if an earlier step reported problems. A genuine
-        # build failure leaves no dxc.exe, so if-no-files-found: warn keeps that
-        # from masking the real error with a second one.
-        if: always()
+        # Only on the deliverable path (release branch / manual opt-in). always() so
+        # a problem in an earlier step doesn't skip the upload; a genuine build
+        # failure leaves no dxc.exe, so if-no-files-found: warn keeps that from
+        # masking the real error.
+        if: ${{ always() && steps.publish_gate.outputs.publish == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: dxc_rc_${{ steps.version.outputs.version }}
-          # The dxc binary, the manifest (dxc commit + pinned SPIR-V deps +
-          # per-suite pass/fail counts + validated flag), and the per-harness
-          # JUnit reports. Downstream pipelines read rc-manifest.json.
+          # The DXC tools the offload-tests job needs as DXC_DIR (dxc.exe needs
+          # dxcompiler.dll to run; DXC_DIR holds dxc + dxv), the manifest, and the
+          # per-suite JUnit reports.
           path: |
             build/bin/dxc.exe
+            build/bin/dxv.exe
+            build/bin/dxcompiler.dll
             build/rc-manifest.json
             build/spirv-*-results.xml
           if-no-files-found: warn
 
-      - name: Trigger offload-test-suite (DXC Vulkan tests on all GPUs)
-        if: ${{ github.event.created || inputs.dispatch_offload_tests }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.OFFLOAD_TESTS_DISPATCH_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
+  # Run the LLVM offload-test-suite against the release candidate on software
+  # renderers -- no physical GPUs. WARP provides a software D3D12 device and
+  # lavapipe (Mesa) a software Vulkan device, so this runs on a hosted runner. Only
+  # on the deliverable path (release branch / manual opt-in).
+  offload-tests:
+    needs: build-and-validate
+    if: ${{ needs.build-and-validate.outputs.publish == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - name: Download the release candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: dxc_rc_${{ needs.build-and-validate.outputs.version }}
+          path: rc
+
+      - name: Locate DXC_DIR
+        id: dxc
+        shell: pwsh
         run: |
-          # No-op when the cross-repo dispatch token isn't configured (e.g. forks).
-          # secrets can't be used in an `if:`, so we guard here instead.
-          if [ -z "$GH_TOKEN" ]; then
-            echo "OFFLOAD_TESTS_DISPATCH_TOKEN not set; skipping offload dispatch."
-            exit 0
-          fi
-          jq -n \
-            --arg repo "$GITHUB_REPOSITORY" \
-            --arg run_id "$GITHUB_RUN_ID" \
-            --arg version "$VERSION" \
-            '{event_type: "dxc-rc",
-              client_payload: {repo: $repo, run_id: $run_id, version: $version,
-                               artifact: ("dxc_rc_" + $version)}}' \
-            | gh api "repos/$OFFLOAD_TESTS_REPO/dispatches" --input -
-          echo "Dispatched dxc-rc to $OFFLOAD_TESTS_REPO (version $VERSION, run $GITHUB_RUN_ID)."
+          $dxc = Get-ChildItem rc -Recurse -Filter dxc.exe | Select-Object -First 1
+          if (-not $dxc) { throw "dxc.exe not found in the RC artifact" }
+          "dir=$($dxc.Directory.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "DXC_DIR = $($dxc.Directory.FullName)"
+
+      - name: Setup MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # lavapipe (Mesa's software Vulkan) ships in the Windows Mesa build. Grab the
+      # latest from pal1000/mesa-dist-win and point the Vulkan loader at its ICD.
+      - name: Install lavapipe (software Vulkan)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $asset = gh release view -R pal1000/mesa-dist-win --json assets `
+            --jq '.assets[].name | select(test("release-msvc\\.7z$"))' | Select-Object -First 1
+          if (-not $asset) { throw "no Mesa release-msvc.7z asset found" }
+          gh release download -R pal1000/mesa-dist-win --pattern "$asset" -D "$env:RUNNER_TEMP\mesa"
+          7z x "$env:RUNNER_TEMP\mesa\$asset" -o"$env:RUNNER_TEMP\mesa\x" -y | Out-Null
+          $icd = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "lvp_icd*.json" | Select-Object -First 1).FullName
+          if (-not $icd) { throw "lavapipe ICD (lvp_icd*.json) not found in Mesa package" }
+          "VK_DRIVER_FILES=$icd"   | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VK_ICD_FILENAMES=$icd"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "lavapipe ICD: $icd"
+
+      - name: Checkout offload-test-suite
+        uses: actions/checkout@v4
+        with:
+          repository: llvm/offload-test-suite
+          path: OffloadTest
+          fetch-depth: 1
+      - name: Checkout LLVM
+        uses: actions/checkout@v4
+        with:
+          repository: llvm/llvm-project
+          path: llvm-project
+          fetch-depth: 1
+      - name: Checkout golden images
+        uses: actions/checkout@v4
+        with:
+          repository: llvm/offload-golden-images
+          path: golden-images
+          fetch-depth: 1
+      - name: Install OffloadTest python deps
+        run: python -m pip install -r OffloadTest/test/requirements.txt
+
+      - name: Configure LLVM + OffloadTest against the RC's DXC
+        run: >-
+          cmake -G Ninja -B llvm-project/build
+          -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=On
+          -DLLVM_EXTERNAL_PROJECTS=OffloadTest
+          -C llvm-project/clang/cmake/caches/HLSL.cmake
+          -DDXC_DIR="${{ steps.dxc.outputs.dir }}"
+          -DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=${{ github.workspace }}/OffloadTest
+          -DGOLDENIMAGE_DIR=${{ github.workspace }}/golden-images
+          -DOFFLOADTEST_TEST_CLANG=Off
+          -DLLVM_LIT_ARGS="--xunit-xml-output=testresults.xunit.xml -v"
+          llvm-project/llvm
+
+      - name: Build offload test dependencies
+        run: cmake --build llvm-project/build --target hlsl-test-depends
+
+      - name: Run offload tests on WARP (D3D12)
+        run: cmake --build llvm-project/build --target check-hlsl-warp-d3d12
+
+      - name: Run offload tests on lavapipe (Vulkan)
+        if: always()   # run the Vulkan path even if WARP failed
+        run: cmake --build llvm-project/build --target check-hlsl-vk
+
+      - name: Upload offload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offload-results-${{ needs.build-and-validate.outputs.version }}
+          path: llvm-project/build/**/testresults.xunit.xml
+          if-no-files-found: warn

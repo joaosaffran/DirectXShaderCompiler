@@ -12,18 +12,23 @@ the single source of truth for which SPIR-V DXC is built against. There is no
 separate pin file — whatever the submodules are committed at is what gets built,
 tested, and shipped.
 
-## The two workflows
+## The pipeline
 
-**`weekly-spirv-update.yml`** — runs on a weekly schedule (and on demand). It bumps
-the SPIRV-Headers / SPIRV-Tools submodules to their latest upstream commit and, if
-anything changed, commits that bump onto a fresh `release/vulkan/weekly-<date>`
-branch and opens a PR against the default branch. Pushing the branch triggers the
-pipeline below; its build/test checks attach to the commit and show on the PR, so
-the bump is merged only once the candidate is green. (It uses a PAT —
-`WEEKLY_BUMP_TOKEN`, contents:write + pull-requests:write — because pushes/PRs made
-with the default `GITHUB_TOKEN` don't trigger other workflows.)
+Everything lives in one workflow, **`vulkan-sdk-rc.yml`**, with three triggers:
 
-**`vulkan-sdk-rc.yml`** — runs on every push to a `release/vulkan/<version>` branch:
+- **schedule (weekly)** — runs the `bump` job: advances the SPIRV-Headers /
+  SPIRV-Tools submodules to their latest upstream commit and, if anything changed,
+  commits that bump onto a fresh `vk-update/<date>` branch and opens a PR against
+  the default branch. Pushing that branch runs build-and-validate, so the bump's
+  test results attach to the commit and show on the PR — merged only once it is
+  green. (Uses a PAT — `WEEKLY_BUMP_TOKEN`, contents:write + pull-requests:write —
+  because pushes/PRs made with the default `GITHUB_TOKEN` don't trigger workflows.)
+- **push to `vk-update/**` or `release/vulkan/**`** — runs build-and-validate (and,
+  on a release branch, the deliverable steps below).
+- **workflow_dispatch (manual)** — `update_deps` runs the `bump` instead of
+  building; otherwise it builds, with `publish_artifact` controlling the deliverable.
+
+`build-and-validate` always:
 
 1. **Checkout** the repo with `submodules: true`, so DXC builds against exactly the
    SPIR-V the submodule pointers name.
@@ -37,13 +42,20 @@ with the default `GITHUB_TOKEN` don't trigger other workflows.)
    of dxc's output. Each is non-fatal; per-suite results and a top-level
    `validated` flag are recorded in `rc-manifest.json` (`--allow-test-failures`
    keeps failures from blocking publication).
-4. **Publish & dispatch** — uploads the `dxc` binary, `rc-manifest.json` (DXC commit
-   + the submodule SPIR-V commits + per-suite results + `validated`), and the JUnit
-   reports as the `dxc_rc_<version>` artifact. On branch creation it also fires a
-   `repository_dispatch` to the offload-test-suite consumer.
 
-So the weekly bump → branch → build/test → offload dispatch chain is fully
-automatic; the submodule commit is the candidate.
+The **deliverable** steps run only on `release/vulkan/**` pushes or a manual opt-in
+(`publish_artifact`) — not on the weekly `vk-update` validation runs:
+
+4. **Publish** — uploads `dxc.exe` + `dxv.exe` + `dxcompiler.dll`, `rc-manifest.json`
+   (DXC commit + the submodule SPIR-V commits + per-suite results + `validated`),
+   and the JUnit reports as the `dxc_rc_<version>` artifact.
+5. **Offload tests** — the `offload-tests` job runs the suite against the candidate
+   on software renderers (see below).
+
+So the weekly bump → `vk-update` PR → build/test chain is automatic; an actual SDK
+release candidate is a `release/vulkan/<version>` branch, which additionally
+publishes the artifact and runs the offload tests. The submodule commit is the
+candidate.
 
 ## Bumping the submodules manually
 
@@ -62,13 +74,14 @@ git submodule update --init external/SPIRV-Headers external/SPIRV-Tools
 python utils/vulkan-sdk/build_and_test.py --build-dir build
 ```
 
-## Downstream: execution on Vulkan (OffloadTest)
+## Downstream: execution on software renderers (OffloadTest)
 
-`offload-test-suite-dxc-rc.yaml` (a prototype meant to live in
-`llvm/offload-test-suite`) receives the `dxc-rc` dispatch, downloads the RC's `dxc`
-binary, and runs the DXC Vulkan offload tests (`check-hlsl-vk`) across the GPU
-providers — actually executing shaders on a device. See the cross-repo token notes
-in that file's header.
+The `offload-tests` job clones `llvm/offload-test-suite`, builds it with `DXC_DIR`
+pointed at the candidate's `dxc`, and runs its tests against software renderers —
+WARP for D3D12 (`check-hlsl-warp-d3d12`) and lavapipe, Mesa's software Vulkan, for
+Vulkan (`check-hlsl-vk`). This actually executes the shaders the candidate compiles,
+with no physical GPU. lavapipe is fetched from the Windows Mesa build
+(`pal1000/mesa-dist-win`) and selected via `VK_DRIVER_FILES`.
 
 ## Not yet prototyped (discussion points for the spec)
 
