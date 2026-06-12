@@ -189,7 +189,8 @@ def suite_gtest(build_dir):
     proc = _capture([str(binary), f"--gtest_output=xml:{xml}"])
     passed = _int(re.search(r"\[\s*PASSED\s*\] (\d+) test", proc.stdout))
     failed = _int(re.search(r"\[\s*FAILED\s*\] (\d+) test", proc.stdout))
-    names = _dedup(re.findall(r"\[\s*FAILED\s*\] (\S+\.\S+)", proc.stdout))
+    # Each failure is reported as "Suite.Case  [file.cpp:line]".
+    names = _gtest_failures_with_files(proc.stdout)
     return _suite("spirv-unit", "gtest", "ran", passed, failed,
                   (passed or 0) + (failed or 0), names, proc.returncode)
 
@@ -243,7 +244,7 @@ def suite_taef(build_dir):
     passed = _int(re.search(r"Passed[=:]\s*(\d+)", proc.stdout))
     failed = _int(re.search(r"Failed[=:]\s*(\d+)", proc.stdout))
     return _suite("spirv-taef", "taef", "ran", passed, failed, total,
-                  None, proc.returncode)
+                  _taef_failures_with_files(proc.stdout), proc.returncode)
 
 
 # Trivially-valid shaders, one per stage, used to exercise the standalone
@@ -318,6 +319,35 @@ def _dedup(seq):
     return out
 
 
+def _gtest_failures_with_files(out):
+    """Pair each failed gtest case with the source file:line of its failure.
+    gtest prints `path\\foo.cpp(70): error:` (Windows) or `path/foo.cpp:70: Failure`
+    just before the matching `[  FAILED  ] Suite.Case` line."""
+    failures, loc = [], None
+    for line in out.splitlines():
+        # The end-of-run "[ FAILED ] N tests, listed below:" block repeats the
+        # failures without file info -- stop before it so we don't duplicate them.
+        if re.match(r"\[\s*FAILED\s*\]\s+\d+\s+tests?\b", line):
+            break
+        m = re.match(r"\s*(\S+\.(?:cpp|cc|cxx|h|hpp|inc))[:(](\d+)\)?:\s*(?:error|Failure)",
+                     line)
+        if m:
+            loc = f"{Path(m.group(1)).name}:{m.group(2)}"
+            continue
+        m = re.match(r"\[\s*FAILED\s*\]\s+(\S+\.\S+)", line)
+        if m:
+            failures.append(f"{m.group(1)}  [{loc}]" if loc else m.group(1))
+            loc = None
+    return _dedup(failures)
+
+
+def _taef_failures_with_files(out):
+    """Best-effort: name each failed TAEF test and its source file. A TAEF test
+    `Class::Method` lives in `Class.cpp` by convention (e.g. RewriterTest.cpp)."""
+    names = _dedup(re.findall(r"(\w+(?:::\w+)+)\s*\[Failed\]", out))
+    return [f"{n}  [{n.split('::')[0]}.cpp]" for n in names]
+
+
 # --------------------------------------------------------------------------- #
 # Manifest
 # --------------------------------------------------------------------------- #
@@ -342,6 +372,32 @@ def git_head():
 
 def suite_clean(s):
     return s["status"] == "ran" and not s["failed"] and s["returncode"] == 0
+
+
+# The SPIR-V test frameworks, each with a human title so the log says which is
+# which at a glance. Order = run order.
+SUITES = [
+    ("googletest unit tests (ClangSPIRVTests)", suite_gtest),
+    ("lit tests (CodeGenSPIRV corpus)", suite_lit),
+    ("TAEF tests (ClangHLSLTests, *Spirv*)", suite_taef),
+    ("spirv-val (validate generated SPIR-V)", suite_spirv_val),
+]
+
+
+def run_suite(title, fn, build_dir):
+    """Run one framework inside a titled, collapsible log group, then print a
+    one-line verdict (visible without expanding the group)."""
+    print(f"\n::group::{title}", flush=True)
+    result = fn(build_dir)
+    result["title"] = title
+    print("::endgroup::", flush=True)
+    if result["status"] != "ran":
+        print(f">>> [SKIPPED] {title} -- {result['note']}", flush=True)
+    else:
+        verdict = "PASS" if suite_clean(result) else "FAIL"
+        print(f">>> [{verdict}] {title}: "
+              f"{result['passed']} passed, {result['failed']} failed", flush=True)
+    return result
 
 
 def write_manifest(build_dir, dxc_sha, suites):
@@ -388,24 +444,26 @@ def main(argv=None):
         # spirv-val, built standalone and dropped into build/bin (on the tests' PATH).
         build_spirv_val(build_dir, args.jobs)
 
-    # Run every SPIR-V harness. Each is independent and non-fatal.
-    suites = [suite_gtest(build_dir), suite_lit(build_dir), suite_taef(build_dir),
-              suite_spirv_val(build_dir)]
+    # Run every SPIR-V framework. Each is independent and non-fatal, and its output
+    # is grouped under a clear title (see run_suite) so the log names which is which.
+    suites = [run_suite(title, fn, build_dir) for title, fn in SUITES]
     manifest = write_manifest(build_dir, git_head(), suites)
 
-    print("\n=== SPIR-V test summary ===")
+    print("\n==================== SPIR-V test summary ====================")
     any_problem = False
     for s in suites:
+        label = s.get("title", s["name"])
         if s["status"] != "ran":
             any_problem = True
-            print(f"  {s['name']:<14} {s['harness']:<6} SKIPPED ({s['note']})")
+            print(f"  [SKIPPED] {label} -- {s['note']}")
         else:
-            mark = "ok" if suite_clean(s) else "FAILURES"
-            any_problem = any_problem or not suite_clean(s)
-            print(f"  {s['name']:<14} {s['harness']:<6} {s['passed']} passed, "
-                  f"{s['failed']} failed  [{mark}]")
+            ok = suite_clean(s)
+            any_problem = any_problem or not ok
+            print(f"  [{'PASS' if ok else 'FAIL'}] {label}: "
+                  f"{s['passed']} passed, {s['failed']} failed")
             for name in s["failed_tests"]:
-                print(f"        FAILED: {name}")
+                print(f"           FAILED: {name}")
+    print("=============================================================")
     print(f"Release candidate manifest: {manifest}")
 
     if any_problem and not args.allow_test_failures:
