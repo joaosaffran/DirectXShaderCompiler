@@ -42,7 +42,10 @@ jobs:
   # Weekly (or manual) dependency bump. Advances the SPIR-V submodules and opens a
   # PR on vk-update/<date>; pushing that branch drives build-and-validate below.
   bump:
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.update_deps) }}
+    # workflow_dispatch boolean inputs arrive as the STRINGS 'true'/'false', so
+    # compare against the string -- `&& inputs.update_deps` would treat 'false' as a
+    # truthy non-empty string.
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.update_deps == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout DXC
@@ -91,7 +94,9 @@ jobs:
             || echo "PR for $branch may already exist; skipping create."
 
   build-and-validate:
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.update_deps == false) }}
+    # Build on any push, and on a manual run unless it asked for the bump instead.
+    # (workflow_dispatch booleans are strings, so compare with != 'true'.)
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.update_deps != 'true') }}
     runs-on: windows-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
