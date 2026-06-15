@@ -189,6 +189,12 @@ jobs:
       # Two software Vulkan ICDs from the Windows Mesa build: lavapipe (lvp, pure CPU)
       # and Dozen (dzn, Vulkan-on-D3D12 -- runs on the WARP software D3D12 adapter).
       # VK_DRIVER_FILES isn't exported globally; each test run below selects one ICD.
+      #
+      # Select the .x86_64.json ICDs explicitly: the package also ships 32-bit
+      # (.x86.json) variants, and loading a 32-bit ICD into this 64-bit process yields
+      # VK_ERROR_INCOMPATIBLE_DRIVER. The driver DLLs' folder must also be on PATH so
+      # the loader can resolve their dependencies (Dozen's vulkan_dzn.dll needs
+      # dxil.dll, which the Mesa package ships alongside it).
       - name: Install Mesa software Vulkan ICDs (lavapipe + Dozen)
         shell: pwsh
         env:
@@ -199,14 +205,17 @@ jobs:
           if (-not $asset) { throw "no Mesa release-msvc.7z asset found" }
           gh release download -R pal1000/mesa-dist-win --pattern "$asset" -D "$env:RUNNER_TEMP\mesa"
           7z x "$env:RUNNER_TEMP\mesa\$asset" -o"$env:RUNNER_TEMP\mesa\x" -y | Out-Null
-          $lvp = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "lvp_icd*.json" | Select-Object -First 1).FullName
-          $dzn = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "dzn_icd*.json" | Select-Object -First 1).FullName
-          if (-not $lvp) { throw "lavapipe ICD (lvp_icd*.json) not found in Mesa package" }
-          if (-not $dzn) { throw "Dozen ICD (dzn_icd*.json) not found in Mesa package" }
+          $lvp = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "lvp_icd.x86_64.json" | Select-Object -First 1).FullName
+          $dzn = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "dzn_icd.x86_64.json" | Select-Object -First 1).FullName
+          if (-not $lvp) { throw "lavapipe ICD (lvp_icd.x86_64.json) not found in Mesa package" }
+          if (-not $dzn) { throw "Dozen ICD (dzn_icd.x86_64.json) not found in Mesa package" }
+          $bin = Split-Path $lvp   # x64 folder: vulkan_lvp.dll, vulkan_dzn.dll, dxil.dll
           "LVP_ICD=$lvp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "DZN_ICD=$dzn" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$bin"         | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           Write-Host "lavapipe ICD: $lvp"
           Write-Host "Dozen ICD:    $dzn"
+          Write-Host "Mesa bin dir (added to PATH): $bin"
 
       - name: Checkout offload-test-suite
         uses: actions/checkout@v4
@@ -249,6 +258,7 @@ jobs:
         env:
           VK_DRIVER_FILES: ${{ env.LVP_ICD }}
           VK_ICD_FILENAMES: ${{ env.LVP_ICD }}
+          VK_LOADER_DEBUG: error,warn   # log why an ICD is accepted/rejected
           LIT_OPTS: --xunit-xml-output=${{ github.workspace }}/results-lavapipe.xml
         run: cmake --build llvm-project/build --target check-hlsl-vk
 
@@ -257,6 +267,7 @@ jobs:
         env:
           VK_DRIVER_FILES: ${{ env.DZN_ICD }}
           VK_ICD_FILENAMES: ${{ env.DZN_ICD }}
+          VK_LOADER_DEBUG: error,warn
           LIT_OPTS: --xunit-xml-output=${{ github.workspace }}/results-warp-dozen.xml
         run: cmake --build llvm-project/build --target check-hlsl-vk
 
