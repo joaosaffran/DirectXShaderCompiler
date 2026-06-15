@@ -76,12 +76,22 @@ python utils/vulkan-sdk/build_and_test.py --build-dir build
 
 ## Downstream: execution on software renderers (OffloadTest)
 
-The `offload-tests` job clones `llvm/offload-test-suite`, builds it with `DXC_DIR`
-pointed at the candidate's `dxc`, and runs its tests against software renderers —
-WARP for D3D12 (`check-hlsl-warp-d3d12`) and lavapipe, Mesa's software Vulkan, for
-Vulkan (`check-hlsl-vk`). This actually executes the shaders the candidate compiles,
-with no physical GPU. lavapipe is fetched from the Windows Mesa build
-(`pal1000/mesa-dist-win`) and selected via `VK_DRIVER_FILES`.
+`offload-tests.yml` clones `llvm/offload-test-suite`, builds it with `DXC_DIR` pointed
+at the candidate's `dxc`, and runs its Vulkan tests (`check-hlsl-vk`) — the DXC Vulkan
+SDK candidate emits SPIR-V, so the Vulkan path is what matters. It runs on **WARP**
+with no physical GPU, via **Dozen** (`dzn`, Mesa's Vulkan-on-D3D12): on a runner with
+no hardware GPU, Dozen's D3D12 device is WARP (software). The Dozen ICD comes from the
+Windows Mesa build (`pal1000/mesa-dist-win`); the test step sets `VK_DRIVER_FILES` to
+that ICD **in the same shell that launches cmake**, so the Vulkan loader in the
+`api-query` device-enumeration helper inherits it (a GitHub `env:` value and a registry
+entry both failed to reach that helper through the cmake→ninja→cmd→python chain). The
+Vulkan SDK is installed so the suite's `find_package(Vulkan)` succeeds and the
+`check-hlsl-vk` target is built.
+
+This workflow is **reusable**: the RC pipeline invokes it via `workflow_call`, and you
+can run it **standalone** from the Actions UI (`workflow_dispatch`) against an existing
+candidate — give it the `run_id` of a prior pipeline run and the `artifact_name` (e.g.
+`dxc_rc_main`). That lets you iterate on the offload/WARP setup without rebuilding DXC.
 
 ## Not yet prototyped (discussion points for the spec)
 

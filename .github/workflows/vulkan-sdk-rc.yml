@@ -135,133 +135,17 @@ jobs:
             build/spirv-*-results.xml
           if-no-files-found: warn
 
-  # Run the LLVM offload-test-suite Vulkan tests against the release candidate on
-  # WARP -- no physical GPU. The DXC Vulkan SDK candidate emits SPIR-V, so we run
-  # check-hlsl-vk through Dozen (Mesa's Vulkan-on-D3D12, dzn): on a runner with no
-  # hardware GPU its D3D12 device is WARP (software), so the candidate's SPIR-V
-  # actually executes on WARP. Only on the deliverable path (release branch / manual
-  # opt-in).
+  # Run the offload-test-suite Vulkan tests against the candidate on WARP (via Dozen).
+  # Factored into a reusable workflow so it can also be run standalone against an
+  # existing artifact (offload-tests.yml, workflow_dispatch) without rebuilding DXC.
+  # Only on the deliverable path (release branch / manual opt-in).
   offload-tests:
     needs: build-and-validate
     if: ${{ needs.build-and-validate.outputs.publish == 'true' }}
-    runs-on: windows-latest
-    steps:
-      - name: Download the release candidate
-        uses: actions/download-artifact@v4
-        with:
-          name: dxc_rc_${{ needs.build-and-validate.outputs.version }}
-          path: rc
-
-      - name: Locate DXC_DIR
-        id: dxc
-        shell: pwsh
-        run: |
-          $dxc = Get-ChildItem rc -Recurse -Filter dxc.exe | Select-Object -First 1
-          if (-not $dxc) { throw "dxc.exe not found in the RC artifact" }
-          "dir=$($dxc.Directory.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "DXC_DIR = $($dxc.Directory.FullName)"
-
-      - name: Setup MSVC developer environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-      - name: Install Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v6
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      # The offload suite's Vulkan backend -- and the check-hlsl-vk target -- is only
-      # built when find_package(Vulkan) succeeds, so install the Vulkan SDK for the
-      # headers + loader (vulkan-1.lib/.dll). The runtime ICD is supplied separately.
-      - name: Install Vulkan SDK (headers + loader)
-        shell: pwsh
-        run: |
-          $exe = "$env:RUNNER_TEMP\VulkanSDK.exe"
-          Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe?Human=true" -OutFile $exe
-          Start-Process $exe -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -Wait
-          $sdk = (Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
-          if (-not $sdk) { throw "Vulkan SDK install dir not found under C:\VulkanSDK" }
-          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "$sdk\Bin"        | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          Write-Host "VULKAN_SDK = $sdk"
-
-      # Install Mesa's Dozen (dzn) Vulkan-on-D3D12 driver and REGISTER its ICD in the
-      # registry. The Vulkan loader discovers ICDs from
-      # HKLM\SOFTWARE\Khronos\Vulkan\Drivers -- pointing VK_DRIVER_FILES at the json
-      # via step env did not survive the cmake->ninja->cmd->python->api-query chain
-      # (the loader fell back to the registry and found "no drivers"). Use the
-      # .x86_64.json (the package also ships a 32-bit .x86.json, which would load into
-      # this 64-bit process as VK_ERROR_INCOMPATIBLE_DRIVER) and put the driver folder
-      # on PATH so vulkan_dzn.dll can resolve its dxil.dll dependency (shipped alongside).
-      - name: Install Mesa Dozen (Vulkan on WARP) and register its ICD
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $asset = gh release view -R pal1000/mesa-dist-win --json assets `
-            --jq '.assets[].name | select(test("release-msvc\\.7z$"))' | Select-Object -First 1
-          if (-not $asset) { throw "no Mesa release-msvc.7z asset found" }
-          gh release download -R pal1000/mesa-dist-win --pattern "$asset" -D "$env:RUNNER_TEMP\mesa"
-          7z x "$env:RUNNER_TEMP\mesa\$asset" -o"$env:RUNNER_TEMP\mesa\x" -y | Out-Null
-          $dzn = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "dzn_icd.x86_64.json" | Select-Object -First 1).FullName
-          if (-not $dzn) { throw "Dozen ICD (dzn_icd.x86_64.json) not found in Mesa package" }
-          $bin = Split-Path $dzn   # x64 folder: vulkan_dzn.dll, dxil.dll
-          $key = 'HKLM:\SOFTWARE\Khronos\Vulkan\Drivers'
-          New-Item -Path $key -Force | Out-Null
-          New-ItemProperty -Path $key -Name $dzn -PropertyType DWord -Value 0 -Force | Out-Null
-          "$bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          Write-Host "Registered Dozen ICD: $dzn"
-          Write-Host "Mesa bin dir (added to PATH): $bin"
-
-      - name: Checkout offload-test-suite
-        uses: actions/checkout@v4
-        with:
-          repository: llvm/offload-test-suite
-          path: OffloadTest
-          fetch-depth: 1
-      - name: Checkout LLVM
-        uses: actions/checkout@v4
-        with:
-          repository: llvm/llvm-project
-          path: llvm-project
-          fetch-depth: 1
-      - name: Checkout golden images
-        uses: actions/checkout@v4
-        with:
-          repository: llvm/offload-golden-images
-          path: golden-images
-          fetch-depth: 1
-      - name: Install OffloadTest python deps
-        run: python -m pip install -r OffloadTest/test/requirements.txt
-
-      - name: Configure LLVM + OffloadTest against the RC's DXC
-        run: >-
-          cmake -G Ninja -B llvm-project/build
-          -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=On
-          -DLLVM_EXTERNAL_PROJECTS=OffloadTest
-          -C llvm-project/clang/cmake/caches/HLSL.cmake
-          -DDXC_DIR="${{ steps.dxc.outputs.dir }}"
-          -DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=${{ github.workspace }}/OffloadTest
-          -DGOLDENIMAGE_DIR=${{ github.workspace }}/golden-images
-          -DOFFLOADTEST_TEST_CLANG=Off
-          -DLLVM_LIT_ARGS="--xunit-xml-output=testresults.xunit.xml -v"
-          llvm-project/llvm
-
-      - name: Build offload test dependencies
-        run: cmake --build llvm-project/build --target hlsl-test-depends
-
-      - name: Run Vulkan offload tests on WARP (Dozen, Vulkan-on-D3D12)
-        env:
-          VK_LOADER_DEBUG: error,warn   # log which ICD the loader accepts/rejects
-          LIT_OPTS: --xunit-xml-output=${{ github.workspace }}/results-warp.xml
-        run: cmake --build llvm-project/build --target check-hlsl-vk
-
-      - name: Upload offload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: offload-results-${{ needs.build-and-validate.outputs.version }}
-          path: ${{ github.workspace }}/results-*.xml
-          if-no-files-found: warn
+    permissions:
+      contents: read
+      actions: read   # the reusable workflow downloads the artifact via the Actions API
+    uses: ./.github/workflows/offload-tests.yml
+    with:
+      artifact_name: dxc_rc_${{ needs.build-and-validate.outputs.version }}
+      run_id: ${{ github.run_id }}
