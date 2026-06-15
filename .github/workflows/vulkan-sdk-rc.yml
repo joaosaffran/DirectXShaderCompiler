@@ -9,7 +9,7 @@ name: "Vulkan SDK release candidate"
 #     opens vk-update PRs; release/vulkan branches are cut by hand for a release.
 #   * workflow_dispatch -- manual run for any ref.
 #
-# The dxc_rc_<version> artifact and the offload-test-suite run (WARP + lavapipe) are
+# The dxc_rc_<version> artifact and the offload-test-suite run (WARP via Dozen) are
 # the release-candidate deliverable -- produced only on release/vulkan/** pushes or
 # a manual opt-in (publish_artifact), not on the weekly vk-update validation runs.
 
@@ -136,10 +136,11 @@ jobs:
           if-no-files-found: warn
 
   # Run the LLVM offload-test-suite Vulkan tests against the release candidate on
-  # software renderers -- no physical GPUs. The DXC Vulkan SDK candidate emits
-  # SPIR-V, so we run check-hlsl-vk on two software Vulkan backends: lavapipe (Mesa's
-  # pure-CPU Vulkan) and Dozen (Mesa's Vulkan-on-D3D12, dzn) on the WARP software
-  # adapter. Only on the deliverable path (release branch / manual opt-in).
+  # WARP -- no physical GPU. The DXC Vulkan SDK candidate emits SPIR-V, so we run
+  # check-hlsl-vk through Dozen (Mesa's Vulkan-on-D3D12, dzn): on a runner with no
+  # hardware GPU its D3D12 device is WARP (software), so the candidate's SPIR-V
+  # actually executes on WARP. Only on the deliverable path (release branch / manual
+  # opt-in).
   offload-tests:
     needs: build-and-validate
     if: ${{ needs.build-and-validate.outputs.publish == 'true' }}
@@ -186,16 +187,15 @@ jobs:
           "$sdk\Bin"        | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           Write-Host "VULKAN_SDK = $sdk"
 
-      # Two software Vulkan ICDs from the Windows Mesa build: lavapipe (lvp, pure CPU)
-      # and Dozen (dzn, Vulkan-on-D3D12 -- runs on the WARP software D3D12 adapter).
-      # VK_DRIVER_FILES isn't exported globally; each test run below selects one ICD.
-      #
-      # Select the .x86_64.json ICDs explicitly: the package also ships 32-bit
-      # (.x86.json) variants, and loading a 32-bit ICD into this 64-bit process yields
-      # VK_ERROR_INCOMPATIBLE_DRIVER. The driver DLLs' folder must also be on PATH so
-      # the loader can resolve their dependencies (Dozen's vulkan_dzn.dll needs
-      # dxil.dll, which the Mesa package ships alongside it).
-      - name: Install Mesa software Vulkan ICDs (lavapipe + Dozen)
+      # Install Mesa's Dozen (dzn) Vulkan-on-D3D12 driver and REGISTER its ICD in the
+      # registry. The Vulkan loader discovers ICDs from
+      # HKLM\SOFTWARE\Khronos\Vulkan\Drivers -- pointing VK_DRIVER_FILES at the json
+      # via step env did not survive the cmake->ninja->cmd->python->api-query chain
+      # (the loader fell back to the registry and found "no drivers"). Use the
+      # .x86_64.json (the package also ships a 32-bit .x86.json, which would load into
+      # this 64-bit process as VK_ERROR_INCOMPATIBLE_DRIVER) and put the driver folder
+      # on PATH so vulkan_dzn.dll can resolve its dxil.dll dependency (shipped alongside).
+      - name: Install Mesa Dozen (Vulkan on WARP) and register its ICD
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -205,16 +205,14 @@ jobs:
           if (-not $asset) { throw "no Mesa release-msvc.7z asset found" }
           gh release download -R pal1000/mesa-dist-win --pattern "$asset" -D "$env:RUNNER_TEMP\mesa"
           7z x "$env:RUNNER_TEMP\mesa\$asset" -o"$env:RUNNER_TEMP\mesa\x" -y | Out-Null
-          $lvp = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "lvp_icd.x86_64.json" | Select-Object -First 1).FullName
           $dzn = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "dzn_icd.x86_64.json" | Select-Object -First 1).FullName
-          if (-not $lvp) { throw "lavapipe ICD (lvp_icd.x86_64.json) not found in Mesa package" }
           if (-not $dzn) { throw "Dozen ICD (dzn_icd.x86_64.json) not found in Mesa package" }
-          $bin = Split-Path $lvp   # x64 folder: vulkan_lvp.dll, vulkan_dzn.dll, dxil.dll
-          "LVP_ICD=$lvp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "DZN_ICD=$dzn" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "$bin"         | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          Write-Host "lavapipe ICD: $lvp"
-          Write-Host "Dozen ICD:    $dzn"
+          $bin = Split-Path $dzn   # x64 folder: vulkan_dzn.dll, dxil.dll
+          $key = 'HKLM:\SOFTWARE\Khronos\Vulkan\Drivers'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name $dzn -PropertyType DWord -Value 0 -Force | Out-Null
+          "$bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "Registered Dozen ICD: $dzn"
           Write-Host "Mesa bin dir (added to PATH): $bin"
 
       - name: Checkout offload-test-suite
@@ -254,21 +252,10 @@ jobs:
       - name: Build offload test dependencies
         run: cmake --build llvm-project/build --target hlsl-test-depends
 
-      - name: Run Vulkan offload tests on lavapipe (software Vulkan)
-        env:
-          VK_DRIVER_FILES: ${{ env.LVP_ICD }}
-          VK_ICD_FILENAMES: ${{ env.LVP_ICD }}
-          VK_LOADER_DEBUG: error,warn   # log why an ICD is accepted/rejected
-          LIT_OPTS: --xunit-xml-output=${{ github.workspace }}/results-lavapipe.xml
-        run: cmake --build llvm-project/build --target check-hlsl-vk
-
       - name: Run Vulkan offload tests on WARP (Dozen, Vulkan-on-D3D12)
-        if: always()   # run even if the lavapipe pass failed
         env:
-          VK_DRIVER_FILES: ${{ env.DZN_ICD }}
-          VK_ICD_FILENAMES: ${{ env.DZN_ICD }}
-          VK_LOADER_DEBUG: error,warn
-          LIT_OPTS: --xunit-xml-output=${{ github.workspace }}/results-warp-dozen.xml
+          VK_LOADER_DEBUG: error,warn   # log which ICD the loader accepts/rejects
+          LIT_OPTS: --xunit-xml-output=${{ github.workspace }}/results-warp.xml
         run: cmake --build llvm-project/build --target check-hlsl-vk
 
       - name: Upload offload test results
