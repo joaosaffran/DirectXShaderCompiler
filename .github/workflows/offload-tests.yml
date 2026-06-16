@@ -81,12 +81,15 @@ jobs:
           "$sdk\Bin"        | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           Write-Host "VULKAN_SDK = $sdk"
 
-      # Fetch Mesa's Dozen (dzn) Vulkan-on-D3D12 driver. On a runner with no hardware
-      # GPU its D3D12 device is WARP (software). We only extract here; the test step
-      # points the loader at the ICD via VK_DRIVER_FILES set in-process, because a
-      # GitHub `env:` value and a registry entry both failed to reach the api-query
-      # helper that enumerates devices.
-      - name: Fetch Mesa Dozen driver
+      # Fetch Mesa's Dozen (dzn) Vulkan-on-D3D12 driver and REGISTER its ICD in
+      # HKLM\SOFTWARE\Khronos\Vulkan\Drivers. The Vulkan loader IGNORES
+      # VK_DRIVER_FILES / VK_ICD_FILENAMES when the process is elevated -- and
+      # GitHub-hosted runners run elevated -- so the registry is the ONLY way to make
+      # the driver discoverable. Use reg.exe (the value name is the full ICD path; a
+      # path contains ':' and '\', which PowerShell's New-ItemProperty -Name mangles).
+      # On a runner with no hardware GPU, Dozen's D3D12 device is WARP (software). Pick
+      # the .x86_64.json (a 32-bit .x86.json would load as VK_ERROR_INCOMPATIBLE_DRIVER).
+      - name: Fetch and register Mesa Dozen (Vulkan on WARP)
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -96,6 +99,11 @@ jobs:
           if (-not $asset) { throw "no Mesa release-msvc.7z asset found" }
           gh release download -R pal1000/mesa-dist-win --pattern "$asset" -D "$env:RUNNER_TEMP\mesa"
           7z x "$env:RUNNER_TEMP\mesa\$asset" -o"$env:RUNNER_TEMP\mesa\x" -y | Out-Null
+          $dzn = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "dzn_icd.x86_64.json" | Select-Object -First 1).FullName
+          if (-not $dzn) { throw "Dozen ICD (dzn_icd.x86_64.json) not found in Mesa package" }
+          reg add "HKLM\SOFTWARE\Khronos\Vulkan\Drivers" /v "$dzn" /t REG_DWORD /d 0 /f /reg:64
+          reg query "HKLM\SOFTWARE\Khronos\Vulkan\Drivers" /reg:64
+          Write-Host "Registered Dozen ICD: $dzn"
 
       - name: Checkout offload-test-suite
         uses: actions/checkout@v4
@@ -134,24 +142,19 @@ jobs:
       - name: Build offload test dependencies
         run: cmake --build llvm-project/build --target hlsl-test-depends
 
-      # Point the Vulkan loader at the Dozen ICD via VK_DRIVER_FILES set IN THIS shell
-      # so it is inherited by cmake -> ninja -> cmd -> python -> the api-query helper.
-      # A GitHub step `env:` value and an HKLM registry entry both failed to reach that
-      # helper (the loader fell back to an empty registry: "Found no drivers"), so set
-      # it in-process here. Use the .x86_64.json (a 32-bit .x86.json would load as
-      # VK_ERROR_INCOMPATIBLE_DRIVER) and prepend the driver folder to PATH so
-      # vulkan_dzn.dll resolves its dxil.dll dependency (shipped alongside).
+      # The elevated Vulkan loader discovers the Dozen ICD from the registry (registered
+      # above) -- env-var ICD selection is ignored when elevated. Prepend the driver
+      # folder to PATH so vulkan_dzn.dll resolves its dxil.dll dependency (shipped
+      # alongside). VK_LOADER_DEBUG is honored even when elevated, so keep it for
+      # diagnostics.
       - name: Run Vulkan offload tests on WARP (Dozen)
         shell: pwsh
         run: |
-          $dzn = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "dzn_icd.x86_64.json" | Select-Object -First 1).FullName
-          if (-not $dzn) { throw "Dozen ICD (dzn_icd.x86_64.json) not found in Mesa package" }
-          $env:VK_DRIVER_FILES  = $dzn
-          $env:VK_ICD_FILENAMES = $dzn
-          $env:VK_LOADER_DEBUG  = "all"
-          $env:PATH = "$(Split-Path $dzn);$env:PATH"
+          $bin = (Get-ChildItem "$env:RUNNER_TEMP\mesa\x" -Recurse -Filter "dzn_icd.x86_64.json" | Select-Object -First 1).Directory.FullName
+          if (-not $bin) { throw "Dozen ICD (dzn_icd.x86_64.json) not found in Mesa package" }
+          $env:PATH = "$bin;$env:PATH"
+          $env:VK_LOADER_DEBUG = "all"
           $env:LIT_OPTS = "--xunit-xml-output=$env:GITHUB_WORKSPACE\results-warp.xml"
-          Write-Host "VK_DRIVER_FILES = $dzn"
           cmake --build llvm-project/build --target check-hlsl-vk
 
       - name: Upload offload test results
