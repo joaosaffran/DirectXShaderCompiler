@@ -111,6 +111,24 @@ jobs:
           repository: llvm/offload-test-suite
           path: OffloadTest
           fetch-depth: 1
+
+      # The suite tags any "Microsoft Basic Render Driver" device as WARP and adds
+      # config.warp_arch as a feature -- but warp_arch is only defined for the
+      # warp-d3d12 suite (gated by FORCE_WARP, hardcoded False for the vk suite, not a
+      # cmake option). Our Vulkan device is Dozen-on-WARP, so the vk suite hits that
+      # path with warp_arch unset -> AttributeError. Default it to the host arch so the
+      # vk suite tolerates a WARP-backed Vulkan device. (Worth upstreaming in
+      # offload-test-suite; this is a local workaround.)
+      - name: Patch OffloadTest to tolerate a WARP-backed Vulkan device
+        shell: pwsh
+        run: |
+          $f = "OffloadTest/test/lit.cfg.py"
+          $c = Get-Content $f -Raw
+          $patched = $c -replace 'config\.available_features\.add\(config\.warp_arch\)', 'config.available_features.add(getattr(config, "warp_arch", "x64"))'
+          if ($patched -eq $c) { Write-Warning "warp_arch patch pattern not found; OffloadTest lit.cfg.py may have changed upstream" }
+          Set-Content -Path $f -Value $patched -NoNewline
+          Write-Host "Patched $f"
+
       - name: Checkout LLVM
         uses: actions/checkout@v4
         with:
