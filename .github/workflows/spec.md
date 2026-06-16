@@ -40,10 +40,10 @@ release-candidate pipeline, which builds and tests DXC, and the results surface 
 the pull request, so the bump is merged only once it is green. When an SDK release is
 being prepared, the pipeline runs against a `release/vulkan/<version>` branch and
 additionally publishes the candidate as a build artifact and runs the LLVM
-offload-test-suite's Vulkan tests against it on two software Vulkan backends —
-lavapipe and Dozen (Mesa's Vulkan-on-D3D12) on the WARP adapter — so its shaders are
-actually executed without a physical GPU. The pipeline can also be started manually.
-The SDK builders
+offload-test-suite against it on software renderers, so its shaders are actually
+executed without a physical GPU: the Vulkan tests on lavapipe (Mesa's software Vulkan,
+exercising the candidate's SPIR-V) and the DirectX tests on WARP (Microsoft's software
+D3D12 device). The pipeline can also be started manually. The SDK builders
 do not consume the artifact; they are given the candidate's DXC commit, which the
 manifest records.
 
@@ -64,7 +64,7 @@ flowchart TD
     subgraph deliverable ["Release-candidate deliverable"]
         direction TB
         publish["Publish dxc_rc artifact + manifest"] --> offload
-        offload["check-hlsl-vk on lavapipe<br/>and on WARP via Dozen"]
+        offload["Vulkan (check-hlsl-vk) on lavapipe<br/>DirectX (check-hlsl-warp-d3d12) on WARP"]
     end
 
     test -. build / test checks .-> vkpr
@@ -103,13 +103,13 @@ candidate — a `release/vulkan/<version>` branch, or a manual run that opts in.
    reports are published as a single artifact, named `dxc_rc_<version>`.
 
 4. **Offload tests.** A job runs the LLVM offload-test-suite against the candidate.
-   It clones the suite, builds it against the candidate's DXC binary, and runs its
-   Vulkan tests (`check-hlsl-vk`) — the candidate emits SPIR-V, so the Vulkan path
-   is what matters. The target runs on two software Vulkan backends rather than a
-   physical GPU: lavapipe (Mesa's pure-CPU Vulkan) and Dozen (Mesa's Vulkan-on-D3D12),
-   whose D3D12 device is WARP on a runner with no hardware GPU. This actually executes
-   the shaders the candidate compiles, so the candidate is exercised end to end on a
-   hosted runner with no GPU hardware.
+   It clones the suite, builds it against the candidate's DXC binary, and runs it on
+   software renderers rather than a physical GPU, split by API: the Vulkan tests
+   (`check-hlsl-vk`) on lavapipe, Mesa's pure-CPU Vulkan — exercising the candidate's
+   SPIR-V, which is what matters for the Vulkan SDK — and the DirectX tests
+   (`check-hlsl-warp-d3d12`) on WARP, Microsoft's software D3D12 device, exercising the
+   candidate's DXIL. This actually executes the shaders the candidate compiles, so the
+   candidate is exercised end to end on a hosted runner with no GPU hardware.
 
 ### Release manifest
 
@@ -155,6 +155,6 @@ ready for the Vulkan SDK.
   pinned to.
 * Every SPIRV testing tool passes, and the SPIRV the binary emits validates under
   `spirv-val`.
-* The shaders the candidate compiles execute on the offload-test-suite on both
-  software Vulkan backends (lavapipe, and Dozen on the WARP adapter).
+* The shaders the candidate compiles execute on the offload-test-suite under both
+  software renderers: the SPIR-V on lavapipe (Vulkan) and the DXIL on WARP (DirectX).
 * The manifest records the result, with `validated` set to `true`.

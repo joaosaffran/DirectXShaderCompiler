@@ -9,7 +9,7 @@ name: "Vulkan SDK release candidate"
 #     opens vk-update PRs; release/vulkan branches are cut by hand for a release.
 #   * workflow_dispatch -- manual run for any ref.
 #
-# The dxc_rc_<version> artifact and the offload-test-suite run (lavapipe + WARP/Dozen) are
+# The dxc_rc_<version> artifact and the offload-test-suite run (lavapipe + WARP) are
 # the release-candidate deliverable -- produced only on release/vulkan/** pushes or
 # a manual opt-in (publish_artifact), not on the weekly vk-update validation runs.
 
@@ -135,8 +135,8 @@ jobs:
             build/spirv-*-results.xml
           if-no-files-found: warn
 
-  # Run the offload-test-suite Vulkan tests against the candidate on software Vulkan
-  # (lavapipe + Dozen-on-WARP). Factored into a reusable workflow so it can also be run
+  # Run the offload-test-suite against the candidate on software renderers: Vulkan on
+  # lavapipe, DirectX on WARP. Factored into a reusable workflow so it can also be run
   # standalone against an existing artifact (offload-tests.yml, workflow_dispatch)
   # without rebuilding DXC. Only on the deliverable path (release branch / manual opt-in).
   offload-tests:
