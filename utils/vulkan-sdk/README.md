@@ -78,16 +78,22 @@ python utils/vulkan-sdk/build_and_test.py --build-dir build
 
 `offload-tests.yml` clones `llvm/offload-test-suite`, builds it with `DXC_DIR` pointed
 at the candidate's `dxc`, and runs its Vulkan tests (`check-hlsl-vk`) — the DXC Vulkan
-SDK candidate emits SPIR-V, so the Vulkan path is what matters. It runs on **WARP**
-with no physical GPU, via **Dozen** (`dzn`, Mesa's Vulkan-on-D3D12): on a runner with
-no hardware GPU, Dozen's D3D12 device is WARP (software). The Dozen ICD comes from the
-Windows Mesa build (`pal1000/mesa-dist-win`); it is **registered in the registry**
-(`HKLM\SOFTWARE\Khronos\Vulkan\Drivers`, via `reg.exe`) because the Vulkan loader
-**ignores `VK_DRIVER_FILES`/`VK_ICD_FILENAMES` when the process is elevated** — and
-GitHub-hosted runners run elevated — so the registry is the only discovery path it
-trusts. The driver folder is put on `PATH` so `vulkan_dzn.dll` finds its `dxil.dll`
-dependency. The Vulkan SDK is installed so the suite's `find_package(Vulkan)` succeeds
-and the `check-hlsl-vk` target is built.
+SDK candidate emits SPIR-V, so the Vulkan path is what matters. It runs on **two
+software Vulkan backends**, no physical GPU: **lavapipe** (`lvp`, Mesa's pure-CPU
+Vulkan) and **Dozen** (`dzn`, Mesa's Vulkan-on-D3D12) on the **WARP** software adapter
+— on a runner with no hardware GPU, Dozen's D3D12 device is WARP.
+
+Both ICDs come from the Windows Mesa build (`pal1000/mesa-dist-win`) and are
+**registered in the registry** (`HKLM\SOFTWARE\Khronos\Vulkan\Drivers`, via `reg.exe`)
+because the Vulkan loader **ignores `VK_DRIVER_FILES`/`VK_ICD_FILENAMES` when the
+process is elevated** — and GitHub-hosted runners run elevated — so the registry is the
+only discovery path it trusts. `check-hlsl-vk` runs once per backend, selecting the
+device with the suite's own `OFFLOADTEST_GPU_NAME` (a Python-side regex on the device
+description: `llvmpipe` for lavapipe, `Basic Render Driver` for WARP), with results in
+`results-lavapipe.xml` / `results-warp.xml`. The driver folder is put on `PATH` so the
+ICD DLLs resolve their dependencies (Dozen's `vulkan_dzn.dll` needs `dxil.dll`). The
+Vulkan SDK is installed so the suite's `find_package(Vulkan)` succeeds and
+`check-hlsl-vk` is built.
 
 This workflow is **reusable**: the RC pipeline invokes it via `workflow_call`, and you
 can run it **standalone** from the Actions UI (`workflow_dispatch`) against an existing
