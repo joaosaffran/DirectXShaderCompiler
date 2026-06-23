@@ -177,3 +177,176 @@ stages:
         testResultsFormat: 'JUnit'
         testResultsFiles: '**/testresults.xunit.xml'
       condition: succeededOrFailed()
+
+- stage: VulkanSDKReleaseCandidate
+  displayName: 'Vulkan SDK release candidate'
+  dependsOn: []   # independent of Build; runs in parallel
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/release/vulkan/')
+  variables:
+    HLSL_SRC_DIR: '$(Build.SourcesDirectory)'
+    HLSL_BLD_DIR: '$(Agent.BuildDirectory)'
+    platform: x64
+    # Software drivers the offload tests run against (recorded against the candidate).
+    LAVAPIPE_VERSION: '26.1.2'   # pal1000/mesa-dist-win release tag
+    WARP_VERSION: '1.0.19'       # offload-test-suite WARP nuget (LKG)
+
+  jobs:
+  - job: Build
+    displayName: 'Build DXC for SPIR-V'
+    timeoutInMinutes: 120
+    pool:
+      vmImage: windows-2022
+    strategy:
+      matrix:
+        Release:
+          configuration: Release
+        Debug:
+          configuration: Debug
+    steps:
+    - checkout: self
+      clean: true
+      submodules: true
+    - script: |
+        call utils\hct\hctstart.cmd %HLSL_SRC_DIR% %HLSL_BLD_DIR%
+        call utils\hct\hctbuild.cmd -vs2022 -$(platform) -$(configuration) -spirv -spirvtest -show-cmake-log
+      displayName: 'Building (SPIR-V)'
+    - script: |
+        call utils\hct\hctstart.cmd %HLSL_SRC_DIR% %HLSL_BLD_DIR%
+        call utils\hct\hcttest.cmd -$(configuration) spirv
+      displayName: 'SPIR-V Tests'
+      condition: succeededOrFailed()
+    # Publish the Release binaries (DXC_DIR) for the offload job. dxil.dll is needed
+    # to sign DXIL for the WARP/Direct3D 12 run.
+    - pwsh: |
+        $bin = "$(HLSL_BLD_DIR)\$(configuration)\bin"
+        $dst = "$(Build.ArtifactStagingDirectory)\dxc"
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null
+        foreach ($f in @("dxc.exe","dxv.exe","dxcompiler.dll","dxil.dll")) {
+          if (Test-Path "$bin\$f") { Copy-Item "$bin\$f" $dst } else { Write-Warning "missing $f" }
+        }
+      displayName: 'Stage DXC binaries'
+      condition: and(succeeded(), eq(variables['configuration'], 'Release'))
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish DXC binaries'
+      condition: and(succeeded(), eq(variables['configuration'], 'Release'))
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)\dxc'
+        artifact: 'dxc_vulkan'
+
+  - job: OffloadTests
+    displayName: 'Offload tests (lavapipe + WARP)'
+    dependsOn: Build
+    timeoutInMinutes: 180
+    pool:
+      vmImage: windows-2022
+    variables:
+      # vcvars persists the MSVC env to later steps so cmake/ninja find cl.exe.
+      VS_DEV: 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat'
+    workspace:
+      clean: all
+    steps:
+    - checkout: none
+
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download DXC binaries'
+      inputs:
+        artifact: 'dxc_vulkan'
+        path: '$(Agent.TempDirectory)\dxc'
+
+    - pwsh: |
+        $dxc = Get-ChildItem "$(Agent.TempDirectory)\dxc" -Recurse -Filter dxc.exe | Select-Object -First 1
+        if (-not $dxc) { throw "dxc.exe not found in the published binaries" }
+        Write-Host "##vso[task.setvariable variable=DXC_DIR]$($dxc.Directory.FullName)"
+        Write-Host "DXC_DIR = $($dxc.Directory.FullName)"
+      displayName: 'Locate DXC_DIR'
+
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.11'
+    - script: choco install ninja -y
+      displayName: 'Install Ninja'
+    - task: BatchScript@1
+      displayName: 'Set up MSVC environment'
+      inputs:
+        filename: '$(VS_DEV)'
+        modifyEnvironment: true
+
+    # The offload suite's Vulkan backend (check-hlsl-vk) is only built when
+    # find_package(Vulkan) succeeds, so install the Vulkan SDK (headers + loader).
+    - pwsh: |
+        $exe = "$(Agent.TempDirectory)\VulkanSDK.exe"
+        Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe?Human=true" -OutFile $exe
+        Start-Process $exe -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -Wait
+        $sdk = (Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+        if (-not $sdk) { throw "Vulkan SDK install dir not found under C:\VulkanSDK" }
+        Write-Host "##vso[task.setvariable variable=VULKAN_SDK]$sdk"
+        Write-Host "##vso[task.prependpath]$sdk\Bin"
+        Write-Host "VULKAN_SDK = $sdk"
+      displayName: 'Install Vulkan SDK'
+
+    # lavapipe (Mesa's CPU Vulkan) registered in the registry -- the Vulkan loader
+    # ignores VK_DRIVER_FILES when the process is elevated, so the registry is the
+    # only discovery path. The Mesa folder also ships dxil.dll (DXIL signing).
+    - pwsh: |
+        $ver = "$(LAVAPIPE_VERSION)"
+        $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$ver/mesa3d-$ver-release-msvc.7z"
+        Invoke-WebRequest $url -OutFile "$(Agent.TempDirectory)\mesa.7z"
+        7z x "$(Agent.TempDirectory)\mesa.7z" -o"$(Agent.TempDirectory)\mesa" -y | Out-Null
+        $lvp = (Get-ChildItem "$(Agent.TempDirectory)\mesa" -Recurse -Filter "lvp_icd.x86_64.json" | Select-Object -First 1).FullName
+        if (-not $lvp) { throw "lavapipe ICD (lvp_icd.x86_64.json) not found in Mesa package" }
+        reg add "HKLM\SOFTWARE\Khronos\Vulkan\Drivers" /v "$lvp" /t REG_DWORD /d 0 /f /reg:64
+        Write-Host "##vso[task.setvariable variable=MESA_BIN]$(Split-Path $lvp)"
+        Write-Host "Registered lavapipe ICD: $lvp"
+      displayName: 'Install lavapipe (Mesa) and register the ICD'
+
+    - pwsh: |
+        git clone --depth 1 https://github.com/llvm/offload-test-suite OffloadTest
+        git clone --depth 1 https://github.com/llvm/llvm-project llvm-project
+        git clone --depth 1 https://github.com/llvm/offload-golden-images golden-images
+        python -m pip install -r OffloadTest/test/requirements.txt
+      displayName: 'Checkout offload-test-suite + LLVM'
+      workingDirectory: '$(Agent.TempDirectory)'
+
+    - script: >
+        cmake -G Ninja -B llvm-project/build
+        -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=On
+        -DLLVM_EXTERNAL_PROJECTS=OffloadTest
+        -C llvm-project/clang/cmake/caches/HLSL.cmake
+        -DDXC_DIR="$(DXC_DIR)"
+        -DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=$(Agent.TempDirectory)/OffloadTest
+        -DGOLDENIMAGE_DIR=$(Agent.TempDirectory)/golden-images
+        -DOFFLOADTEST_TEST_CLANG=Off
+        -DWARP_VERSION=$(WARP_VERSION)
+        -DLLVM_LIT_ARGS="--xunit-xml-output=testresults.xunit.xml -v"
+        llvm-project/llvm
+      displayName: 'Configure LLVM + OffloadTest against DXC'
+      workingDirectory: '$(Agent.TempDirectory)'
+
+    - script: cmake --build llvm-project/build --target hlsl-test-depends
+      displayName: 'Build offload test dependencies'
+      workingDirectory: '$(Agent.TempDirectory)'
+
+    # Vulkan path: candidate's SPIR-V on lavapipe. PATH gets the Mesa folder so the
+    # ICD DLLs resolve their dependencies; VK_LOADER_DEBUG is kept for diagnostics.
+    - pwsh: |
+        $env:PATH = "$(MESA_BIN);$env:PATH"
+        $env:VK_LOADER_DEBUG = "all"
+        $env:LIT_OPTS = "--xunit-xml-output=$(Agent.TempDirectory)/results-vk-lavapipe.xml"
+        cmake --build llvm-project/build --target check-hlsl-vk
+      displayName: 'Vulkan offload tests on lavapipe'
+      workingDirectory: '$(Agent.TempDirectory)'
+
+    # Direct3D 12 path: candidate's DXIL on WARP (downloaded by the suite's setup_warp).
+    - pwsh: |
+        $env:PATH = "$(MESA_BIN);$env:PATH"
+        $env:LIT_OPTS = "--xunit-xml-output=$(Agent.TempDirectory)/results-d3d12-warp.xml"
+        cmake --build llvm-project/build --target check-hlsl-warp-d3d12
+      displayName: 'DirectX offload tests on WARP'
+      condition: succeededOrFailed()
+      workingDirectory: '$(Agent.TempDirectory)'
+
+    - task: PublishTestResults@2
+      condition: succeededOrFailed()
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '$(Agent.TempDirectory)/results-*.xml'
