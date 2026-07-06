@@ -3007,6 +3007,7 @@ StartSubobjectDecl(ASTContext &context, const char *name,
       NoLoc, &id, nullptr, DelayTypeCreationTrue);
   decl->addAttr(HLSLSubObjectAttr::CreateImplicit(
       context, static_cast<unsigned>(Kind), static_cast<unsigned>(HGT)));
+  decl->addAttr(HLSLNonAutoDeducibleAttr::CreateImplicit(context));
   decl->addAttr(FinalAttr::CreateImplicit(context, FinalAttr::Keyword_final));
   decl->startDefinition();
   return decl;
@@ -3528,6 +3529,8 @@ private:
                               &m_context->Idents.get(StringRef(type1Name)));
     sampleSliceTypeDecl->setAccess(AS_public);
     sampleSliceTypeDecl->setImplicit();
+    sampleSliceTypeDecl->addAttr(
+        HLSLNonAutoDeducibleAttr::CreateImplicit(*m_context));
     recordDecl->addDecl(sampleSliceTypeDecl);
     sampleSliceTypeDecl->startDefinition();
     const bool MutableFalse = false;
@@ -3556,6 +3559,8 @@ private:
     recordDecl->addDecl(sampleTypeDecl);
     sampleTypeDecl->startDefinition();
     sampleTypeDecl->setImplicit();
+    sampleTypeDecl->addAttr(
+        HLSLNonAutoDeducibleAttr::CreateImplicit(*m_context));
 
     FieldDecl *sampleHandleDecl = FieldDecl::Create(
         *m_context, sampleTypeDecl, NoLoc, NoLoc,
@@ -4771,6 +4776,26 @@ public:
       type = GetTypeElementType(arrayType->getElementType());
     }
     return type;
+  }
+
+  bool IsTypeDeducibleWithAuto(QualType type) {
+    if (type.isNull())
+      return false;
+
+    if (hlsl::IsStringType(type) || hlsl::IsStringLiteralType(type))
+      return false;
+
+    if (const CXXRecordDecl *recordDecl =
+            GetStructuralForm(type)->getAsCXXRecordDecl()) {
+      if (!recordDecl->hasAttr<HLSLNonAutoDeducibleAttr>())
+        if (const CXXRecordDecl *pattern =
+                recordDecl->getTemplateInstantiationPattern())
+          recordDecl = pattern;
+      if (recordDecl->hasAttr<HLSLNonAutoDeducibleAttr>())
+        return false;
+    }
+
+    return true;
   }
 
   /// <summary>Given a Clang type, return the ArBasicKind classification for its
@@ -9564,6 +9589,10 @@ clang::ExprResult HLSLExternalSource::PerformHLSLConversion(
     clang::Sema::CheckedConversionKind CCK) {
   QualType sourceType = From->getType();
   sourceType = GetStructuralForm(sourceType);
+
+  // Store off the type attributes that could be accidentially dropped.
+  const bool targetGloballyCoherent = hlsl::HasHLSLGloballyCoherent(targetType);
+  const bool targetReorderCoherent = hlsl::HasHLSLReorderCoherent(targetType);
   targetType = GetStructuralForm(targetType);
   ArTypeInfo SourceInfo, TargetInfo;
   CollectInfo(sourceType, &SourceInfo);
@@ -9580,9 +9609,23 @@ clang::ExprResult HLSLExternalSource::PerformHLSLConversion(
     //    convert that to an array of casts under a special kind of flat
     //    flat conversion node?  What do component conversion casts cast
     //    from?  We don't have a From expression for individiual components.
+    QualType flatCastType = targetType.getUnqualifiedType();
+    // Preserve coherence qualifiers when converting to a resource type so the
+    // converted expression's type still reflects the coherence of its
+    // destination.
+    if (hlsl::IsHLSLResourceType(flatCastType)) {
+      if (targetGloballyCoherent)
+        flatCastType = m_context->getAttributedType(
+            AttributedType::attr_hlsl_globallycoherent, flatCastType,
+            flatCastType);
+      else if (targetReorderCoherent)
+        flatCastType = m_context->getAttributedType(
+            AttributedType::attr_hlsl_reordercoherent, flatCastType,
+            flatCastType);
+    }
     From = m_sema
-               ->ImpCastExprToType(From, targetType.getUnqualifiedType(),
-                                   CK_FlatConversion, From->getValueKind(),
+               ->ImpCastExprToType(From, flatCastType, CK_FlatConversion,
+                                   From->getValueKind(),
                                    /*BasePath=*/0, CCK)
                .get();
     break;
@@ -12785,6 +12828,10 @@ bool hlsl::DiagnoseTypeElements(Sema &S, SourceLocation Loc, QualType Ty,
   llvm::SmallPtrSet<const RecordDecl *, 8> CheckedDecls;
   return DiagnoseElementTypes(S, Loc, Ty, Empty, ObjDiagContext,
                               LongVecDiagContext, CheckedDecls, FD);
+}
+
+bool hlsl::IsTypeDeducibleWithAuto(Sema &S, QualType Ty) {
+  return HLSLExternalSource::FromSema(&S)->IsTypeDeducibleWithAuto(Ty);
 }
 
 bool hlsl::DiagnoseNodeStructArgument(Sema *self, TemplateArgumentLoc ArgLoc,
