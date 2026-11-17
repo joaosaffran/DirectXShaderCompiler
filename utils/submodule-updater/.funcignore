@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+local.settings.json
+README.md
+*.pem
+AzuriteConfig
+__azurite_db_*__.json
+__blobstorage__/
+__queuestorage__/
+appsettings.json
